@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>접속자 모니터링 현황판</title>
+    <!-- 🔥 파이어베이스 데이터베이스 엔진 탑재 -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+    <style>
+        body {
+            background-color: #FFFFFF;
+            height: 100vh;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Pretendard', -apple-system, sans-serif;
+        }
+
+        .title {
+            color: #000000;
+            font-size: 28px;
+            font-weight: 900;
+            margin-bottom: 20px;
+        }
+
+        .count-number {
+            color: #1A73E8;
+            font-size: 100px;
+            font-weight: 900;
+            line-height: 1;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="title">현재 사이트 접속 수:</div>
+    <div id="visitorCount" class="count-number">0</div>
+
+    <script>
+        // 파이어베이스 설정 코드
+        const firebaseConfig = {
+          apiKey: "AIzaSyD-IyAGGXQ69d8LupTU2mKmr87yoenahRo",
+          authDomain: "gimpo-monitoring.firebaseapp.com",
+          projectId: "gimpo-monitoring",
+          storageBucket: "gimpo-monitoring.firebasestorage.app",
+          messagingSenderId: "918422830852",
+          appId: "1:918422830852:web:c9d6412cb2fc3dcc619a51"
+        };
+        
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // 파이어베이스 'active_users'를 감시하며 진짜 실시간 숫자로 업데이트
+        database.ref('active_users').on('value', (snap) => {
+            const count = snap.numChildren(); // 현재 접속 중인 기기 수 계산
+            document.getElementById('visitorCount').innerText = count;
+        });
+    </script>
+
+</body>
+</html>
