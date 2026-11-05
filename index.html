@@ -28,8 +28,8 @@ time { display: block; font-size: 11px; color: #8B95A1; }
 a:focus-visible { outline: 3px solid #ffae42; outline-offset: 3px; }
 @media(max-height:480px) { .monitor-details { position: static; margin-top: 24px; } body { justify-content: flex-start; padding-top: 30px; } }
 </style></head>
-<body><main><h1 class="title">현재 사이트 접속 수:</h1><div id="visitorCount" class="count-number" aria-label="현재 연결 수">—</div></main>
-<footer class="monitor-details"><div id="status" class="status" role="status">서버에 연결하고 있습니다.</div><time id="updated"></time><p class="description">수강신청 도우미를 열어 둔 탭의 연결 수입니다. 같은 사람의 여러 탭은 각각 집계합니다.</p><a href="../course/">다시 돌아가기</a></footer>
+<body><main><h1 class="title">현재 사이트 접속 수:</h1><div id="visitorCount" class="count-number" aria-label="실시간 접속자 수">—</div></main>
+<footer class="monitor-details"><div id="status" class="status" role="status">서버에 연결하고 있습니다.</div><time id="updated"></time><p class="description">지금 접속 중인 방문자 수입니다. 같은 계정의 여러 탭은 한 명으로 집계합니다.</p><a href="../course/">다시 돌아가기</a></footer>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script><script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script><script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script><script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script><script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-functions-compat.js"></script>
 <script>/* Shared Firebase adapter, embedded into every standalone page by build.cjs. */
 window.App = (() => {
@@ -59,11 +59,78 @@ window.App = (() => {
   return api;
 })();
 </script>
+<script>/* Live visitors only. This module never reads Firebase Authentication's account list. */
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.CoursePresence=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
+'use strict';
+const HEARTBEAT_MS=30000,EXPIRES_MS=120000,REFRESH_MS=5000;
+function countVisitors(value,now){
+ if(!value||typeof value!=='object'||!Number.isFinite(now))return 0;
+ return Object.values(value).reduce((total,connections)=>total+(connections&&typeof connections==='object'&&Object.values(connections).some(lastSeen=>typeof lastSeen==='number'&&Number.isFinite(lastSeen)&&lastSeen>now-EXPIRES_MS&&lastSeen<=now+5000)?1:0),0);
+}
+function start({db,uid=null,serverTimestamp,onCount=()=>{},onConnection=()=>{},onError=()=>{},onReadSuccess=()=>{},onWriteSuccess=()=>{},clock=Date.now,schedule=setInterval,unschedule=clearInterval,events=typeof window==='undefined'?null:window,documentObject=typeof document==='undefined'?null:document}){
+ let stopped=false,connected=null,loaded=false,offset=0,data=null,current=null,generation=0,joining=0,armed=false,writing=false,lastBeat=0;
+ const listeners=[],pending=new Set();
+ const time=()=>clock()+offset;
+ const active=(version,ref)=>!stopped&&connected&&version===generation&&ref===current;
+ const removeRef=ref=>{if(ref)Promise.resolve(ref.remove()).catch(()=>{});};
+ function render(){if(!stopped&&connected&&loaded)onCount(countVisitors(data,time()));}
+ function listen(path,success,key){const ref=db.ref(path),error=e=>{if(!stopped){if(key==='presenceRead'){loaded=false;data=null;onCount(null);}onError(key,e);}};ref.on('value',success,error);listeners.push(()=>ref.off('value',success));}
+ async function beat(version=generation,ref=current){
+  if(!ref||!active(version,ref)||!armed||writing)return;
+  writing=true;
+  try{await ref.set(serverTimestamp);if(active(version,ref)){lastBeat=time();onWriteSuccess();}else removeRef(ref);}
+  catch(error){if(active(version,ref))onError('presenceWrite',error);}
+  finally{if(version===generation)writing=false;}
+ }
+ async function join(){
+  if(!uid||stopped||!connected)return;
+  const version=++generation,ref=db.ref('v2/presence/'+uid).push();
+  const previous=current;current=ref;joining=version;armed=false;writing=false;lastBeat=0;removeRef(previous);pending.add(ref);
+  try{
+   // The server must acknowledge disconnect cleanup before publishing an online record.
+   await ref.onDisconnect().remove();
+   if(!active(version,ref)){removeRef(ref);return;}
+   armed=true;await beat(version,ref);
+  }catch(error){if(active(version,ref))onError('presenceWrite',error);}
+  finally{pending.delete(ref);if(joining===version)joining=0;}
+ }
+ listen('.info/serverTimeOffset',snap=>{if(stopped)return;offset=Number.isFinite(snap.val())?snap.val():0;render();},'connection');
+ listen('v2/presence',snap=>{if(stopped)return;data=snap.val();loaded=true;onReadSuccess();render();},'presenceRead');
+ listen('.info/connected',snap=>{
+  if(stopped)return;
+  const next=snap.val()===true;if(next===connected)return;
+  connected=next;onConnection(connected);
+  if(connected){render();join();}
+  else{generation++;joining=0;armed=false;writing=false;const previous=current;current=null;removeRef(previous);onCount(null);}
+ },'connection');
+ const refresh=schedule(render,REFRESH_MS);
+ const heartbeat=schedule(()=>{if(!connected||!uid)return;if(!armed){if(joining!==generation)join();}else if(current&&time()-lastBeat>=HEARTBEAT_MS)beat();},HEARTBEAT_MS);
+ const wake=()=>{if(connected){render();if(current)beat();}};
+ const visible=()=>{if(documentObject?.visibilityState==='visible')wake();};
+ events?.addEventListener('online',wake);events?.addEventListener('focus',wake);documentObject?.addEventListener('visibilitychange',visible);
+ return {remove(){
+  if(stopped)return Promise.resolve();stopped=true;generation++;listeners.forEach(off=>off());unschedule(refresh);unschedule(heartbeat);
+  events?.removeEventListener('online',wake);events?.removeEventListener('focus',wake);documentObject?.removeEventListener('visibilitychange',visible);
+  removeRef(current);current=null;for(const ref of pending)removeRef(ref);pending.clear();return Promise.resolve();
+ }};
+}
+return {HEARTBEAT_MS,EXPIRES_MS,countVisitors,start};
+});
+</script>
 <script>
-(() => {'use strict';const count=document.getElementById('visitorCount'),status=document.getElementById('status'),updated=document.getElementById('updated');let presence=null,connectedRef=null,epoch=0,connected=false,loaded=false,readFailed=false;
+(() => {'use strict';const count=document.getElementById('visitorCount'),status=document.getElementById('status'),updated=document.getElementById('updated');let session=null,epoch=0,connected=false,loaded=false,readFailed=false;
 function show(text,kind=''){status.textContent=text;status.className='status'+(kind?' '+kind:'');}
-function stop(){epoch++;if(presence)presence.off();if(connectedRef)connectedRef.off();presence=null;connectedRef=null;}
-function start(user){stop();count.textContent='—';updated.textContent='';loaded=false;connected=false;readFailed=false;if(!user){show('로그인 연결을 기다리고 있습니다.','offline');return;}const version=epoch;connectedRef=App.db.ref('.info/connected');connectedRef.on('value',snap=>{if(version!==epoch)return;connected=snap.val()===true;if(!connected)show('연결이 끊겼습니다. 마지막 수치는 현재 접속 수가 아닐 수 있습니다.','offline');else if(readFailed)show('접속 현황을 읽을 권한이 없거나 서버 오류가 발생했습니다.','error');else show(loaded?'실시간으로 갱신 중입니다.':'접속 현황을 불러오는 중입니다.');});presence=App.db.ref('v2/presence');presence.on('value',snap=>{if(version!==epoch)return;let total=0;snap.forEach(userSnap=>{userSnap.forEach(connectionSnap=>{if(connectionSnap.val()===true)total++;});});loaded=true;readFailed=false;count.textContent=String(total);const date=new Date();updated.dateTime=date.toISOString();updated.textContent='마지막 갱신 '+new Intl.DateTimeFormat('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(date);if(connected)show('실시간으로 갱신 중입니다.');},error=>{if(version!==epoch)return;readFailed=true;count.textContent='—';show(App.error(error),'error');});}
+function stop(){epoch++;if(session)session.remove();session=null;}
+function start(user){
+ stop();count.textContent='—';updated.textContent='';loaded=false;connected=false;readFailed=false;
+ if(!user){show('로그인 연결을 기다리고 있습니다.','offline');return;}const version=epoch;
+ session=CoursePresence.start({db:App.db,
+  onConnection(online){if(version!==epoch)return;connected=online;if(!online){count.textContent='—';show('연결이 끊겼습니다.','offline');}else if(readFailed)show('접속 현황을 불러오지 못했습니다.','error');else show(loaded?'실시간으로 갱신 중입니다.':'접속 현황을 불러오는 중입니다.');},
+  onCount(total){if(version!==epoch)return;if(total===null){count.textContent='—';return;}loaded=true;count.textContent=String(total);const date=new Date();updated.dateTime=date.toISOString();updated.textContent='마지막 갱신 '+new Intl.DateTimeFormat('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(date);if(connected)show('실시간으로 갱신 중입니다.');},
+  onReadSuccess(){if(version===epoch)readFailed=false;},
+  onError(key,error){if(version!==epoch)return;readFailed=true;count.textContent='—';show(App.error(error),'error');}
+ });
+}
 if(!window.App||App.offline){show('접속 현황은 서버 연결이 필요합니다. 인터넷 연결과 Firebase 설정을 확인해 주세요.','error');return;}App.ready.then(()=>App.auth.onAuthStateChanged(start)).catch(error=>show(App.error(error),'error'));window.addEventListener('pagehide',stop);window.addEventListener('pageshow',event=>{if(event.persisted)start(App.auth.currentUser);});
 })();
 </script></body></html>
