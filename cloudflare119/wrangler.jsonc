@@ -1,0 +1,32 @@
+{
+  "name": "gimpo-course-db",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-13",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "course-secundus",
+      "database_id": "REQUIRES_CLOUDFLARE_DATABASE_ID"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REALTIME",
+        "class_name": "RealtimeHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RealtimeHub"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": false
+  }
+}
