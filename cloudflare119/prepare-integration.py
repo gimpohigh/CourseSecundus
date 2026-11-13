@@ -50,7 +50,7 @@ function cloudflareDeleteCheck119_(ticket){
  if(typeof ticket!=='string'||ticket.length>10000)throw fault_('invalid-request');
  const parts=ticket.split('.');if(parts.length!==2||!constantTimeEqual_(parts[1],tokenSignature_('cloudflare-purge-119:'+parts[0])))throw fault_('invalid-approval');
  let payload;try{payload=JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString());}catch(error){throw fault_('invalid-request');}
- const uids=payload.uids;if(payload.expiresAt<Date.now()||payload.expiresAt>Date.now()+5*60*1000||!Array.isArray(uids)||!uids.length||uids.length>20||uids.some(uid=>!validKey_(uid)||studioIsProtected_(uid)||!read_('private/deletedStudents/'+uid)))throw fault_('studio-protected');
+ const uids=payload.uids;if(!Number.isFinite(payload.expiresAt)||payload.expiresAt<Date.now()||payload.expiresAt>Date.now()+5*60*1000||!Array.isArray(uids)||!uids.length||uids.length>20||uids.some(uid=>!validKey_(uid)||studioIsProtected_(uid)||!read_('private/deletedStudents/'+uid)))throw fault_('studio-protected');
  return{allowed:true,uids:uids};
 }
 function cloudflarePurge119_(uids){
