@@ -713,9 +713,9 @@ window.App = (() => {
   const studioPreview=window.parent!==window&&new URLSearchParams(location.search).get('studio-preview')==='1';
   if(studioPreview){const memory=new Map();cache.read=(key,fallback=null)=>memory.has(key)?memory.get(key):fallback;cache.write=(key,value)=>{memory.set(key,JSON.parse(JSON.stringify(value)));return true;};cache.remove=key=>memory.delete(key);}
   const demo=studioPreview||new URLSearchParams(location.search).get('demo')==='1';
-  const api={config,toast,error,cache,demo,studioPreview,offline:demo||!window.COURSE_SECONDARY_DATABASE_URL||!window.firebase||!firebase.auth||!firebase.database||!firebase.storage,isMember:u=>Boolean(u&&!u.isAnonymous),releaseImages(container){container?.querySelectorAll('img,a[href]').forEach(node=>{const url=node.tagName==='IMG'?node.src:node.href;if(url.startsWith('blob:'))URL.revokeObjectURL(url);});}};
-  if(api.offline){if(!demo)api.initializationError={code:'sdk/unavailable',message:!window.COURSE_SECONDARY_DATABASE_URL?'2학년 전용 서버 연결을 준비하고 있습니다.':'Firebase 연결 모듈을 불러오지 못했습니다. 인터넷 연결을 확인하고 새로고침해주세요.'};api.auth={currentUser:null,onAuthStateChanged(fn){queueMicrotask(()=>fn(null));return ()=>{};}};api.ready=Promise.resolve(null);return api;}
-  firebase.initializeApp(config);api.auth=firebase.auth();api.db=firebase.database();api.courseDb=firebase.app().database(window.COURSE_SECONDARY_DATABASE_URL);api.storage=firebase.storage();if(firebase.functions)api.functions=firebase.app().functions('asia-northeast3');
+  const api={config,toast,error,cache,demo,studioPreview,offline:demo||!window.firebase||!firebase.auth||!firebase.database||!firebase.storage,isMember:u=>Boolean(u&&!u.isAnonymous),releaseImages(container){container?.querySelectorAll('img,a[href]').forEach(node=>{const url=node.tagName==='IMG'?node.src:node.href;if(url.startsWith('blob:'))URL.revokeObjectURL(url);});}};
+  if(api.offline){if(!demo)api.initializationError={code:'sdk/unavailable',message:'Firebase 연결 모듈을 불러오지 못했습니다. 인터넷 연결을 확인하고 새로고침해주세요.'};api.auth={currentUser:null,onAuthStateChanged(fn){queueMicrotask(()=>fn(null));return ()=>{};}};api.ready=Promise.resolve(null);return api;}
+  firebase.initializeApp(config);api.auth=firebase.auth();api.db=firebase.database();api.courseDb=window.COURSE_SECONDARY_DATABASE_URL?firebase.app().database(window.COURSE_SECONDARY_DATABASE_URL):null;api.storage=firebase.storage();if(firebase.functions)api.functions=firebase.app().functions('asia-northeast3');
   let signing=null,resolveReady;api.ready=new Promise(resolve=>resolveReady=resolve);
   api.retryAuthentication=()=>{
     if(api.auth.currentUser)return Promise.resolve(api.auth.currentUser);
@@ -1847,6 +1847,7 @@ function renderVisitorCount() {
  const readError = connectionIssues.get('presenceRead');
  let value = '연결 확인 중';
  if (App.offline) value = '서버 연결 없음';
+ else if (!App.courseDb) value = '2학년 서버 연결 대기';
  else if (presenceOnline === false) value = '연결 끊김';
  else if (readError) value = issueKind(readError) === 'permission' ? '조회 권한 없음' : '조회 실패';
  else if (presenceOnline && tabCount !== null) value = String(tabCount);
@@ -1915,9 +1916,9 @@ function readOnce(ref){return new Promise((resolve,reject)=>{let done=false;cons
 
 function localSave(){return App.cache.write(stateKey(uid),{state,dirty,revision});}
 function currentName(){return profile.name?(App.isMember(user)?`${profile.grade||1}학년 ${profile.classNum}반 ${profile.studentNum}번 ${profile.name}`:profile.name):'익명 사용자';}
-function apply(next){$('recommendResult').textContent='';state=E.normalize(next);dirty=true;conflict=false;localSave();render();$('saveStatus').textContent=App.offline||!user?'기기에 저장됨':'기기 저장됨 · 서버 저장 대기';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flush(),450);}
-async function flush(){clearTimeout(saveTimer);if(!dirty||saving||!readyForSave||conflict||!user||!App.db)return !dirty;const owner=uid,version=epoch,snapshot=JSON.stringify(state),expected=revision;const data=JSON.parse(snapshot),saveToken=++saveGeneration;saving=true;$('saveStatus').textContent='서버 저장 중';try{const result=await App.courseDb.ref('v2/selections/'+owner).transaction(old=>{if((old?.revision||0)!==expected)return;return {...data,revision:expected+1,updatedAt:serverTime()};},undefined,false);if(version!==epoch)return false;if(!result.committed){conflict=true;$('saveStatus').textContent='다른 기기 변경과 충돌 · 여기를 눌러 해결';return false;}revision=expected+1;dirty=JSON.stringify(state)!==snapshot;localSave();clearConnectionIssue('save');$('saveStatus').textContent=dirty?'추가 변경 저장 대기':'서버 저장 완료';return !dirty;}catch(e){if(version===epoch){$('saveStatus').textContent='기기 저장됨 · 서버 저장 실패';reportConnectionIssue('save',e);App.toast(App.error(e));}return false;}finally{if(saveToken===saveGeneration)saving=false;if(dirty&&!conflict&&version===epoch&&navigator.onLine)setTimeout(()=>{if($('saveStatus').textContent==='추가 변경 저장 대기')flush();},500);}}
-$('saveStatus').tabIndex=0;$('saveStatus').role='button';$('saveStatus').onclick=async()=>{if(!conflict&&(connectionIssues.size||user&&!readyForSave)){showConnectionIssues();return;}if(!user)return;const owner=uid,ver=epoch;try{if(conflict){if(!await SiteConfirm('다른 기기의 최신 선택을 불러오시겠습니까? 현재 기기 구성은 충돌 백업으로 남깁니다.'))return;App.cache.write('gimpo_v2_grade2_conflict_'+uid,{state,savedAt:Date.now()});const snap=await readOnce(App.courseDb.ref('v2/selections/'+owner));if(ver!==epoch||owner!==uid)return;const val=snap.val();CourseTermLock.setBaseline(val||{});state=E.normalize(val||{});revision=val?.revision||0;dirty=false;conflict=false;localSave();render();$('saveStatus').textContent='최신 구성 불러옴';}else await flush();}catch(error){if(ver===epoch)App.toast(App.error(error));}};$('saveStatus').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('saveStatus').click();}};
+function apply(next){$('recommendResult').textContent='';state=E.normalize(next);dirty=true;conflict=false;localSave();render();$('saveStatus').textContent=App.offline||!user?'기기에 저장됨':!App.courseDb?'기기에 저장됨 · 2학년 서버 연결 대기':'기기 저장됨 · 서버 저장 대기';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flush(),450);}
+async function flush(){clearTimeout(saveTimer);if(!dirty||saving||!readyForSave||conflict||!user||!App.courseDb)return !dirty;const owner=uid,version=epoch,snapshot=JSON.stringify(state),expected=revision;const data=JSON.parse(snapshot),saveToken=++saveGeneration;saving=true;$('saveStatus').textContent='서버 저장 중';try{const result=await App.courseDb.ref('v2/selections/'+owner).transaction(old=>{if((old?.revision||0)!==expected)return;return {...data,revision:expected+1,updatedAt:serverTime()};},undefined,false);if(version!==epoch)return false;if(!result.committed){conflict=true;$('saveStatus').textContent='다른 기기 변경과 충돌 · 여기를 눌러 해결';return false;}revision=expected+1;dirty=JSON.stringify(state)!==snapshot;localSave();clearConnectionIssue('save');$('saveStatus').textContent=dirty?'추가 변경 저장 대기':'서버 저장 완료';return !dirty;}catch(e){if(version===epoch){$('saveStatus').textContent='기기 저장됨 · 서버 저장 실패';reportConnectionIssue('save',e);App.toast(App.error(e));}return false;}finally{if(saveToken===saveGeneration)saving=false;if(dirty&&!conflict&&version===epoch&&navigator.onLine)setTimeout(()=>{if($('saveStatus').textContent==='추가 변경 저장 대기')flush();},500);}}
+$('saveStatus').tabIndex=0;$('saveStatus').role='button';$('saveStatus').onclick=async()=>{if(!App.courseDb&&!connectionIssues.size)return App.toast('2학년 전용 서버 연결 전입니다. 과목 선택과 추천 구성은 이 기기에 보관하며, 로그인·프로필·문의는 공통 서버와 연결됩니다.');if(!conflict&&(connectionIssues.size||user&&!readyForSave)){showConnectionIssues();return;}if(!user)return;const owner=uid,ver=epoch;try{if(conflict){if(!await SiteConfirm('다른 기기의 최신 선택을 불러오시겠습니까? 현재 기기 구성은 충돌 백업으로 남깁니다.'))return;App.cache.write('gimpo_v2_grade2_conflict_'+uid,{state,savedAt:Date.now()});const snap=await readOnce(App.courseDb.ref('v2/selections/'+owner));if(ver!==epoch||owner!==uid)return;const val=snap.val();CourseTermLock.setBaseline(val||{});state=E.normalize(val||{});revision=val?.revision||0;dirty=false;conflict=false;localSave();render();$('saveStatus').textContent='최신 구성 불러옴';}else await flush();}catch(error){if(ver===epoch)App.toast(App.error(error));}};$('saveStatus').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('saveStatus').click();}};
 function render(){
  const a=E.analyze(state);document.querySelectorAll('#panel-2 .track').forEach(x=>x.checked=state.sciTrack);document.querySelectorAll('#panel-3 .track').forEach(x=>x.checked=recommendationState().sciTrack);
  const rows=[[['total','총 교과 학점',174],['kys','국·영·수 제한',81]],[['kor','국어',8],['math','수학',8],['eng','영어',8]],[['his','한국사',6],['soc','사회',8],['sci','과학',10]],[['pe','체육',10],['art','예술',6]],[['info','정보',0],['msi','수학/과학/정보',state.sciTrack?79:0],['etc','정보/외국어/한문/교양',15]]];
@@ -1971,10 +1972,10 @@ const slotIcons={preview:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
 function renderSlots(){for(const target of [$('slots'),$('aiSlots')]){target.replaceChildren();for(const slot of Object.values(slots)){const box=make('div','save-slot');box.append(make('div','save-slot-name',slot.name));const actions=make('div','save-slot-actions');const add=(label,fn,icon)=>{const b=make('button',icon?'icon-btn':'load-btn',icon?undefined:label);b.type='button';b.title=label;b.setAttribute('aria-label',label);if(icon)b.innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+slotIcons[icon]+'</svg>';b.onclick=()=>Promise.resolve(fn()).catch(e=>App.toast(App.error(e)));actions.append(b);};
  add('미리보기',()=>{const nodes=[];for(const sem of E.semesters.filter(s=>s.limit)){nodes.push(make('h3','',sem.title));E.courses.filter(c=>c.sem===sem.key&&slot.courses?.includes(c.id)&&!c.req).forEach(c=>nodes.push(courseCard(c,false,true)));}$('previewContent').replaceChildren(...nodes);$('previewDialog').showModal();},'preview');
  add('이름 변경',async()=>{const name=prompt('새 구성 이름',slot.name)?.trim();if(!name)return;if(name.length>40)return App.toast('이름은 40자 이하로 입력해주세요.');await saveSlot({...slot,name});},'rename');
- add('삭제',async()=>{if(!await SiteConfirm('저장 구성을 삭제하시겠습니까?'))return;const owner=uid,ver=epoch;if(user)await App.courseDb.ref('v2/slots/'+owner+'/'+slot.id).remove();if(ver!==epoch||owner!==uid)return;delete slots[slot.id];App.cache.write('gimpo_v2_grade2_slots_'+owner,slots);renderSlots();},'remove');
+ add('삭제',async()=>{if(!await SiteConfirm('저장 구성을 삭제하시겠습니까?'))return;const owner=uid,ver=epoch;if(user&&App.courseDb)await App.courseDb.ref('v2/slots/'+owner+'/'+slot.id).remove();if(ver!==epoch||owner!==uid)return;delete slots[slot.id];App.cache.write('gimpo_v2_grade2_slots_'+owner,slots);renderSlots();},'remove');
  add('불러오기',async()=>{if(await SiteConfirm('현재 선택을 이 구성으로 바꿀까요?')){if(target.id==='aiSlots')draftSave(slot);else{apply(slot);validation();}}});box.append(actions);target.append(box);}}}
 
-async function saveSlot(slot){const owner=uid;if(user)await App.courseDb.ref(`v2/slots/${owner}/${slot.id}`).set(slot);if(owner!==uid)return;slots[slot.id]=slot;App.cache.write('gimpo_v2_grade2_slots_'+uid,slots);renderSlots();App.toast('구성을 저장했습니다.');}
+async function saveSlot(slot){const owner=uid;if(user&&App.courseDb)await App.courseDb.ref(`v2/slots/${owner}/${slot.id}`).set(slot);if(owner!==uid)return;slots[slot.id]=slot;App.cache.write('gimpo_v2_grade2_slots_'+uid,slots);renderSlots();App.toast(App.courseDb?'구성을 저장했습니다.':'구성을 이 기기에 저장했습니다. 2학년 전용 서버 연결 전입니다.');}
 document.querySelectorAll('.saveSlot').forEach(b=>b.onclick=async()=>{if(Object.keys(slots).length>=30)return App.toast('저장 구성은 최대 30개입니다.');const name=prompt('저장할 구성 이름 (40자 이하)')?.trim();if(!name)return;if(name.length>40)return App.toast('이름은 40자 이하로 입력해주세요.');try{await saveSlot({id:crypto.randomUUID(),name,...(b.closest('#panel-3')?recommendationState():state)});}catch(e){App.toast(App.error(e));}});
 document.querySelectorAll('.printBtn').forEach(b=>b.onclick=()=>{const selected=b.closest('#panel-3')?recommendationState():state;const p=$('printArea');p.replaceChildren(make('h1','','수강연습 선택 내역'),make('p','',currentName()+' · '+new Date().toLocaleDateString('ko-KR')),make('p','','학교에 제출되지 않은 연습용 자료입니다.'));for(const sem of E.semesters.filter(x=>x.limit)){const sec=make('section');sec.append(make('h2','',sem.title));const t=make('table');for(const c of E.courses.filter(c=>c.sem===sem.key&&!c.req&&selected.courses.includes(c.id))){const tr=make('tr');[c.cat,c.name,c.cred+'학점'].forEach(v=>tr.append(make('td','',v)));t.append(tr);}sec.append(t);p.append(sec);}window.print();});
 function appendMessage(target,m,{scroll=true,id}={}){
@@ -2025,6 +2026,7 @@ function mergeAIHistory(remote){
 }
 function persistAIAnswer(entries,owner,version){
  if(version!==epoch||owner!==uid)return;
+ if(!App.courseDb){App.toast('2학년 전용 서버 연결 전이므로 AI 대화는 현재 화면에만 보관됩니다.');return;}
  let acknowledgement;
  try{const updates={};for(const entry of entries){entry.serverKey=App.courseDb.ref(`v2/aiHistory/${owner}`).push().key;updates[entry.serverKey]={...entry.message,timestamp:serverTime()};}acknowledgement=App.courseDb.ref(`v2/aiHistory/${owner}`).update(updates);}
  catch(error){if(version===epoch&&owner===uid)App.toast('답변은 이 화면에만 남아 있습니다. 서버 대화 저장에 실패했습니다.');return;}
@@ -2056,7 +2058,7 @@ $('aiForm').onsubmit=async event=>{
  }catch(error){if(ver===epoch){if(!easteregg){aiAvailability=error.code==='ai/setup'?'missing':'unavailable';const bubble=$('aiMessages').querySelector('[data-ai-welcome]');if(bubble)updateAIWelcome(bubble);}App.toast(App.error(error));}}
  finally{pending.remove();aiBusy=false;$('aiSend').disabled=false;$('clearAi').disabled=false;}
 };
-$('clearAi').onclick=async()=>{if(aiBusy||!await SiteConfirm('현재 계정의 AI 대화를 삭제하시겠습니까?'))return;const owner=uid,ver=epoch;try{if(user)await App.courseDb.ref('v2/aiHistory/'+owner).remove();if(ver!==epoch||owner!==uid)return;history=[];aiSessionMessages=[];renderHistory();}catch(e){if(ver===epoch)App.toast(App.error(e));}};
+$('clearAi').onclick=async()=>{if(aiBusy||!await SiteConfirm('현재 계정의 AI 대화를 삭제하시겠습니까?'))return;const owner=uid,ver=epoch;try{if(user&&App.courseDb)await App.courseDb.ref('v2/aiHistory/'+owner).remove();if(ver!==epoch||owner!==uid)return;history=[];aiSessionMessages=[];renderHistory();}catch(e){if(ver===epoch)App.toast(App.error(e));}};
 let previewUrls=[];
 function renderFiles(){previewUrls.forEach(url=>URL.revokeObjectURL(url));previewUrls=[];$('attachments').replaceChildren(...selectedFiles.map((file,i)=>{const wrap=make('div','preview-img-wrap'),b=make('button','preview-del','×');if(['image/jpeg','image/png','image/webp'].includes(file.type)){const img=make('img','preview-img');img.src=URL.createObjectURL(file);previewUrls.push(img.src);img.alt=file.name;globalThis.InquiryPreview?.bind(img);wrap.append(img);}else wrap.append(make('span','file-preview','📎 '+file.name));b.type='button';b.setAttribute('aria-label',file.name+' 첨부 삭제');b.disabled=inquiryBusy;b.onclick=()=>{selectedFiles.splice(i,1);renderFiles();};wrap.append(b);return wrap;}));$('attachments').hidden=selectedFiles.length===0;}
 
@@ -2145,40 +2147,59 @@ function resetAccount(next){CourseTermLock.setBaseline(null);globalThis.InquiryP
 async function connect(next,{retry=false}={}){
  profileReady=false;
  if(!retry||user?.uid!==next?.uid)aiSessionMessages=[];
- presenceOnline = null;
- tabCount = null;
- renderVisitorCount();
+ presenceOnline=null;tabCount=null;renderVisitorCount();
  if(!next){resetAccount(null);if(App.authError)reportConnectionIssue('auth',App.authError);return;}
  if(retry&&user?.uid===next.uid){
   localSave();epoch++;saveGeneration++;presenceGeneration++;saving=false;readyForSave=false;clearTimeout(saveTimer);unsub.forEach(f=>f());unsub=[];if(presence){presence.remove().catch(()=>{});presence=null;}connectionIssues.clear();renderConnectionIssues();
  }else resetAccount(next);
  const ver=epoch,owner=next.uid,active=()=>ver===epoch&&owner===uid;
+ const load=async(key,ref,success)=>{try{const snap=await readOnce(ref);if(!active())return;clearConnectionIssue(key);await success(snap);}catch(error){if(!active())return;if(key==='selections'){readyForSave=false;$('saveStatus').textContent=issueKind(error)==='permission'?'기기 저장 · 과목 읽기 권한 없음':'기기 저장 · 과목 불러오기 실패';}reportConnectionIssue(key,error);}};
  Promise.resolve().then(()=>active()?App.support.syncContact(next):undefined).then(()=>{if(active())clearConnectionIssue('contact');},error=>{if(active())reportConnectionIssue('contact',error);});
  $('saveStatus').textContent=dirty?'기기 변경 보관 · 서버 확인 중':'서버 데이터 확인 중';
- try{const primary=await readOnce(App.db.ref('v2/selections/'+owner));if(!active())return;const seed=primary.val()||{};CourseTermLock.setBaseline(seed);const initialized=await App.courseDb.ref('v2/selections/'+owner).transaction(old=>old==null?{...CourseEngine.normalize(seed),revision:1,updatedAt:serverTime()}:undefined,undefined,false);if(!active())return;const established=initialized.snapshot.val();CourseTermLock.setBaseline(established||seed);if(!dirty){state=E.normalize(established||seed);revision=Number(established?.revision)||0;localSave();render();}}catch(error){if(active()){readyForSave=false;reportConnectionIssue('selections',error);$('saveStatus').textContent='2학년 선택 불러오기 실패';}return;}
- // Each feature subscribes independently: a denied profile or AI history must not stop inquiries/presence.
- listen(App.courseDb.ref('v2/slots/'+owner),'value',snap=>{slots=snap.val()||{};App.cache.write('gimpo_v2_grade2_slots_'+owner,slots);renderSlots();},'slots');
+ // Shared identity, profiles and inquiries must remain available independently of the second-year store.
  listen(App.db.ref('v2/inquiries/'+owner).orderByChild('timestamp').limitToLast(100),'value',renderInquiries,'inquiries');
  listen(App.db.ref('v2/statistics/public'),'value',snap=>renderRates(snap.val()||{}),'statistics');
- presence=CoursePresence.start({db:App.courseDb,uid:owner,serverTimestamp:serverTime(),
-  onCount:n=>{if(active()){tabCount=n;renderVisitorCount();}},
-  onConnection:online=>{if(active()){presenceOnline=online;if(!online)tabCount=null;renderVisitorCount();}},
-  onReadSuccess:()=>{if(active())clearConnectionIssue('presenceRead');},
-  onWriteSuccess:()=>{if(active())clearConnectionIssue('presenceWrite');},
-  onError:(key,error)=>{if(active())reportConnectionIssue(key,error);}});
- const load=async(key,ref,success)=>{try{const snap=await readOnce(ref);if(!active())return;clearConnectionIssue(key);await success(snap);}catch(error){if(!active())return;if(key==='selections'){readyForSave=false;$('saveStatus').textContent=issueKind(error)==='permission'?'기기 저장 · 과목 읽기 권한 없음':'기기 저장 · 과목 불러오기 실패';}reportConnectionIssue(key,error);}};
- await Promise.allSettled([
-  load('selections',App.courseDb.ref('v2/selections/'+owner),snap=>{
-   const remote=snap.val();CourseTermLock.setBaseline(remote||state);if(dirty&&(remote?.revision||0)!==revision){conflict=true;$('saveStatus').textContent='다른 기기 변경과 충돌 · 여기를 눌러 해결';}
-   else if(!dirty){state=E.normalize(remote||{});revision=remote?.revision||0;localSave();render();$('saveStatus').textContent='서버 데이터 불러옴';}
-   readyForSave=true;
-   listen(App.courseDb.ref('v2/selections/'+owner),'value',snapshot=>{if(saving)return;const v=snapshot.val();if(!v||v.revision===revision)return;CourseTermLock.setBaseline(v);if(dirty){conflict=true;$('saveStatus').textContent='다른 기기 변경과 충돌 · 여기를 눌러 해결';}else{state=E.normalize(v);revision=v.revision;localSave();render();}},'selections');
-   if(dirty&&!conflict)flush();
-  }),
-  load('profiles',App.db.ref('v2/profiles/'+owner),snap=>{applyProfileSnapshot(snap.val(),owner);listen(App.db.ref('v2/profiles/'+owner),'value',value=>applyProfileSnapshot(value.val(),owner),'profiles');if(App.isMember(next)&&!profile.name&&!retry){$('studentName').value='';updateProfileForm();$('profileDialog').showModal();}}),
-  load('recommendations',App.courseDb.ref('v2/recommendations/'+owner),snap=>{const value=snap.val();if(value){recommendation=E.normalize(value);App.cache.write(draftKey(),recommendation);render();}}),
-  load('history',App.courseDb.ref('v2/aiHistory/'+owner).orderByKey().limitToLast(100),snap=>{history=mergeAIHistory(snap.val());renderHistory();})
- ]);
+ const sharedProfile=load('profiles',App.db.ref('v2/profiles/'+owner),snap=>{applyProfileSnapshot(snap.val(),owner);listen(App.db.ref('v2/profiles/'+owner),'value',value=>applyProfileSnapshot(value.val(),owner),'profiles');if(App.isMember(next)&&!profile.name&&!retry){$('studentName').value='';updateProfileForm();$('profileDialog').showModal();}});
+ async function connectCourses(){
+  let seed;
+  try{
+   const primary=await readOnce(App.db.ref('v2/selections/'+owner));if(!active())return;
+   seed=primary.val()||{};
+   if(!App.courseDb){
+    const cached=App.cache.read(stateKey(owner),{});
+    CourseTermLock.setBaseline(seed);
+    state=E.normalize(dirty?state:(cached.state||seed));
+    if(recommendation)recommendation=E.normalize(recommendation);
+    revision=0;localSave();render();clearConnectionIssue('selections');
+    $('saveStatus').textContent='기기에 저장됨 · 2학년 서버 연결 대기';
+    listen(App.db.ref('v2/selections/'+owner),'value',snap=>{CourseTermLock.setBaseline(snap.val()||{});state=E.normalize(state);if(recommendation)recommendation=E.normalize(recommendation);localSave();render();},'selections');
+    return;
+   }
+   CourseTermLock.setBaseline(seed);
+   const initialized=await App.courseDb.ref('v2/selections/'+owner).transaction(old=>old==null?{...CourseEngine.normalize(seed),revision:1,updatedAt:serverTime()}:undefined,undefined,false);if(!active())return;
+   const established=initialized.snapshot.val();CourseTermLock.setBaseline(established||seed);
+   if(!dirty){state=E.normalize(established||seed);revision=Number(established?.revision)||0;localSave();render();}
+  }catch(error){if(active()){readyForSave=false;reportConnectionIssue('selections',error);$('saveStatus').textContent='2학년 선택 불러오기 실패';}return;}
+  listen(App.courseDb.ref('v2/slots/'+owner),'value',snap=>{slots=snap.val()||{};App.cache.write('gimpo_v2_grade2_slots_'+owner,slots);renderSlots();},'slots');
+  presence=CoursePresence.start({db:App.courseDb,uid:owner,serverTimestamp:serverTime(),
+   onCount:n=>{if(active()){tabCount=n;renderVisitorCount();}},
+   onConnection:online=>{if(active()){presenceOnline=online;if(!online)tabCount=null;renderVisitorCount();}},
+   onReadSuccess:()=>{if(active())clearConnectionIssue('presenceRead');},
+   onWriteSuccess:()=>{if(active())clearConnectionIssue('presenceWrite');},
+   onError:(key,error)=>{if(active())reportConnectionIssue(key,error);}});
+  await Promise.allSettled([
+   load('selections',App.courseDb.ref('v2/selections/'+owner),snap=>{
+    const remote=snap.val();CourseTermLock.setBaseline(remote||state);if(dirty&&(remote?.revision||0)!==revision){conflict=true;$('saveStatus').textContent='다른 기기 변경과 충돌 · 여기를 눌러 해결';}
+    else if(!dirty){state=E.normalize(remote||{});revision=remote?.revision||0;localSave();render();$('saveStatus').textContent='서버 데이터 불러옴';}
+    readyForSave=true;
+    listen(App.courseDb.ref('v2/selections/'+owner),'value',snapshot=>{if(saving)return;const v=snapshot.val();if(!v||v.revision===revision)return;CourseTermLock.setBaseline(v);if(dirty){conflict=true;$('saveStatus').textContent='다른 기기 변경과 충돌 · 여기를 눌러 해결';}else{state=E.normalize(v);revision=v.revision;localSave();render();}},'selections');
+    if(dirty&&!conflict)flush();
+   }),
+   load('recommendations',App.courseDb.ref('v2/recommendations/'+owner),snap=>{const value=snap.val();if(value){recommendation=E.normalize(value);App.cache.write(draftKey(),recommendation);render();}}),
+   load('history',App.courseDb.ref('v2/aiHistory/'+owner).orderByKey().limitToLast(100),snap=>{history=mergeAIHistory(snap.val());renderHistory();})
+  ]);
+ }
+ await Promise.allSettled([sharedProfile,connectCourses()]);
 }
 async function retryConnection(){
  if(retrying)return;if(aiBusy||inquiryBusy||saving)return App.toast('진행 중인 전송을 마친 후 다시 연결해주세요.');
