@@ -2159,7 +2159,7 @@ async function connect(next,{retry=false}={}){
  // Each feature subscribes independently: a denied profile or AI history must not stop inquiries/presence.
  listen(App.courseDb.ref('v2/slots/'+owner),'value',snap=>{slots=snap.val()||{};App.cache.write('gimpo_v2_grade2_slots_'+owner,slots);renderSlots();},'slots');
  listen(App.db.ref('v2/inquiries/'+owner).orderByChild('timestamp').limitToLast(100),'value',renderInquiries,'inquiries');
- listen(App.courseDb.ref('v2/statistics/public'),'value',snap=>renderRates(snap.val()||{}),'statistics');
+ listen(App.db.ref('v2/statistics/public'),'value',snap=>renderRates(snap.val()||{}),'statistics');
  presence=CoursePresence.start({db:App.courseDb,uid:owner,serverTimestamp:serverTime(),
   onCount:n=>{if(active()){tabCount=n;renderVisitorCount();}},
   onConnection:online=>{if(active()){presenceOnline=online;if(!online)tabCount=null;renderVisitorCount();}},
