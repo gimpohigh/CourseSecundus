@@ -110,7 +110,7 @@
       "recommendations": {
         "$uid": {
           ".read": "((auth != null && (auth.uid === $uid || auth.token.admin === true)) && !root.child('private/deletedStudents').child(auth.uid).exists() && !root.child('private/deletedStudents').child($uid).exists()) || (auth != null && root.child('private/studioAdmins').child(auth.uid).val() === true && root.child('private/studioDirectory').child($uid).exists() && root.child('private/reportAdmins').child($uid).val() !== true && root.child('private/studioAdmins').child($uid).val() !== true && !root.child('private/deletedStudents').child(auth.uid).exists() && !root.child('private/deletedStudents').child($uid).exists())",
-          ".write": "((auth != null && (auth.uid === $uid || auth.token.admin === true)) && newData.exists()) && !root.child('private/deletedStudents').child(auth.uid).exists() && !root.child('private/deletedStudents').child($uid).exists() && (!root.child('private/studioStudentLocks').child($uid).exists() || root.child('private/studioStudentLocks').child($uid).child('expiresAt').val() <= now)",
+          ".write": "(auth != null && (auth.uid === $uid || auth.token.admin === true)) && !root.child('private/deletedStudents').child(auth.uid).exists() && !root.child('private/deletedStudents').child($uid).exists()",
           ".validate": "newData.hasChildren(['courses','sciTrack','updatedAt'])",
           "courses": {
             ".validate": "newData.hasChild('0')",
