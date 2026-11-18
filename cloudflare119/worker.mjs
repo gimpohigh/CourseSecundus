@@ -662,6 +662,13 @@ async function mediaHttp120(request,env,url,json,headers){
   if(!await mediaStub120(env,p.id).init(p.id,p.size,p.mime,p.grant))throw bad('permission-denied');
   return json({ok:true,chunk:CHUNK120,finished:row.state!=='uploading'});
  }
+ if(action==='receipts'&&post){
+  const {ids}=await request.json();
+  if(!Array.isArray(ids)||!ids.length||ids.length>60||ids.some(id=>!keyOK(id)))throw bad('invalid-request');
+  const marks=ids.map(()=>'?').join(',');
+  const {results}=await env.DB.prepare('SELECT media_id FROM media_ready120 WHERE viewer=? AND room=? AND media_id IN ('+marks+')').bind(actor,room,...ids).all();
+  return json({ok:true,ready:results.map(row=>row.media_id)});
+ }
  if(action==='receipt'&&keyOK(id)){
   if(post)await env.DB.prepare('INSERT OR IGNORE INTO media_ready120(viewer,room,media_id) VALUES (?,?,?)').bind(actor,room,id).run();
   else if(request.method!=='GET')throw bad('invalid-request');
