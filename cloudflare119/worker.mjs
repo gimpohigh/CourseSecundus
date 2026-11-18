@@ -698,10 +698,14 @@ async function mediaService120(env,scope,p,json){
  }
  if(scope==='remove'){
   if(!Array.isArray(p.ids)||p.ids.length>30||p.ids.some(id=>!mediaId120(id)))throw bad('invalid-request');
-  for(const id of p.ids){const result=await db.prepare('DELETE FROM media_files120 WHERE room=? AND id=?').bind(p.room,id).run();if(result.meta.changes){await mediaStub120(env,id).destroy();await db.prepare('DELETE FROM media_ready120 WHERE room=? AND media_id=?').bind(p.room,id).run();}}
+  for(const id of p.ids){const result=await db.prepare("UPDATE media_files120 SET state='deleting' WHERE room=? AND id=?").bind(p.room,id).run();if(result.meta.changes)await eraseMedia120(env,p.room,id);}
   return json({ok:true});
  }
  throw bad('invalid-request');
 }
+async function eraseMedia120(env,room,id){
+ await mediaStub120(env,id).destroy();
+ await env.DB.batch([env.DB.prepare('DELETE FROM media_ready120 WHERE room=? AND media_id=?').bind(room,id),env.DB.prepare("DELETE FROM media_files120 WHERE id=? AND room=? AND state='deleting'").bind(id,room)]);
+}
 
-async function cleanMedia120(env){const rows=(await env.DB.prepare("SELECT id FROM media_files120 WHERE state='deleting' LIMIT 20").all()).results;for(const row of rows){await mediaStub120(env,row.id).destroy();await env.DB.prepare("DELETE FROM media_files120 WHERE id=? AND state='deleting'").bind(row.id).run();}}
+async function cleanMedia120(env){const rows=(await env.DB.prepare("SELECT id,room FROM media_files120 WHERE state='deleting' LIMIT 20").all()).results;for(const row of rows)await eraseMedia120(env,row.room,row.id);}
