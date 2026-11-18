@@ -488,7 +488,7 @@ export default {
     if(origin&&origin!==ORIGIN)return json({error:'forbidden-origin'},403);
     if(request.method==='OPTIONS')return new Response(null,{status:204,headers});
     try {
-      if(url.pathname==='/health'&&request.method==='GET') {await Promise.all(['student_data','deleted_students','statistics_members','statistics_counts','primary_students120','media_files120'].map(table=>env.DB.prepare('SELECT 1 FROM '+table+' LIMIT 1').first()));if(!env.REALTIME)throw bad('realtime-not-configured');return json({ok:true,service:'CourseSecundus',version:'1.20',database:'D1',features:['baseline119','statistics119','delete119','mirror120','media120']});}
+      if(url.pathname==='/health'&&request.method==='GET') {await Promise.all(['student_data','deleted_students','statistics_members','statistics_counts','primary_students120','media_files120'].map(table=>env.DB.prepare('SELECT 1 FROM '+table+' LIMIT 1').first()));if(!env.REALTIME)throw bad('realtime-not-configured');return json({ok:true,service:'CourseSecundus',version:'1.21',database:'D1',features:['baseline119','statistics119','delete119','mirror120','media120','photo121']});}
       const hub=env.REALTIME.get(env.REALTIME.idFromName('school'));
       if(url.pathname.startsWith('/media/'))return await mediaHttp120(request,env,url,json,headers);
       if(url.pathname.startsWith('/service/')&&request.method==='POST'){
@@ -618,6 +618,17 @@ export class Attachment120 extends DurableObject {
   const buf=await req.arrayBuffer();if(buf.byteLength!==expected||n===0&&!matchesMedia120(meta.mime,new Uint8Array(buf)))return new Response(null,{status:400});
   this.sql.exec('INSERT OR REPLACE INTO pieces(n,data) VALUES(?,?)',n,buf);return new Response(null,{status:204});
  }
+ async storePhoto(id,size,mime,grant,buffer){
+  if(size<1||size>8*1048576||buffer.byteLength!==size||!mime.startsWith('image/')||!matchesMedia120(mime,new Uint8Array(buffer)))return false;
+  if(!await this.init(id,size,mime,grant))return false;
+  const meta=await this.ctx.storage.get('meta');
+  if(meta.mime!==mime||meta.grant!==grant||meta.size!==size)return false;
+  if(meta.finished)return true;
+  for(let start=0,n=0;start<size;start+=CHUNK120,n++){
+   this.sql.exec('INSERT OR REPLACE INTO pieces(n,data) VALUES(?,?)',n,buffer.slice(start,Math.min(start+CHUNK120,size)));
+  }
+  await this.ctx.storage.put('meta',{...meta,finished:true});return true;
+ }
  async finish(grant){const m=await this.ctx.storage.get('meta');if(!m||m.grant!==grant)return false;if(m.finished)return true;
   if(this.sql.exec('SELECT COUNT(*) AS n FROM pieces').one().n!==Math.ceil(m.size/CHUNK120))return false;
   await this.ctx.storage.put('meta',{...m,finished:true});return true;
@@ -645,6 +656,13 @@ async function mediaScope120(request,env,room){
  const gone=await env.DB.prepare('SELECT 1 FROM deleted_students WHERE uid IN (?,?) LIMIT 1').bind(room,user.uid).first();if(gone)throw bad('permission-denied');
  return user.uid;
 }
+async function reserveMedia121(env,room,actor,p){
+  if(!mediaId120(p.id)||!mediaId120(p.grant)||!keyOK(p.messageId)||!mediaTypes120.has(p.mime)||typeof p.name!=='string'||!p.name.trim()||p.name.length>120||/[\u0000-\u001f]/.test(p.name)||!Number.isSafeInteger(p.size)||p.size<1||p.size>MAX_FILE120)throw bad('invalid-file');
+  const db=env.DB,now=Date.now();const insert=await db.prepare("INSERT OR IGNORE INTO media_files120(id,room,actor,message_id,name,mime,size,state,created_at) SELECT ?,?,?,?,?,?,?,'uploading',? WHERE (SELECT COALESCE(SUM(size),0) FROM media_files120 WHERE actor=? AND state!='attached' AND created_at>?) + ? <= 1073741824").bind(p.id,room,actor,p.messageId,p.name,p.mime,p.size,now,actor,now-86400000,p.size).run();
+  const row=await db.prepare('SELECT * FROM media_files120 WHERE id=?').bind(p.id).first();if(!row)throw bad('resource-exhausted');
+  if(row.state==='deleting'||row.room!==room||row.actor!==actor||row.message_id!==p.messageId||row.size!==p.size||row.mime!==p.mime)throw bad('permission-denied');
+  return row;
+}
 async function mediaHttp120(request,env,url,json,headers){
  const action=url.pathname.slice('/media/'.length),room=url.searchParams.get('room'),id=url.searchParams.get('id'),post=request.method==='POST';
  if(action==='part'&&post&&mediaId120(id)){const r=await mediaStub120(env,id).fetch(request);return new Response(null,{status:r.status,headers});}
@@ -654,12 +672,20 @@ async function mediaHttp120(request,env,url,json,headers){
   await env.DB.prepare("UPDATE media_files120 SET state='ready' WHERE id=? AND state='uploading'").bind(id).run();return json({ok:true});
  }
  const actor=await mediaScope120(request,env,room);
- if(action==='start'&&post){
-  const p=await request.json();if(!mediaId120(p.id)||!mediaId120(p.grant)||!keyOK(p.messageId)||!mediaTypes120.has(p.mime)||typeof p.name!=='string'||!p.name.trim()||p.name.length>120||/[\u0000-\u001f]/.test(p.name)||!Number.isSafeInteger(p.size)||p.size<1||p.size>MAX_FILE120)throw bad('invalid-file');
-  const db=env.DB,now=Date.now();const insert=await db.prepare("INSERT OR IGNORE INTO media_files120(id,room,actor,message_id,name,mime,size,state,created_at) SELECT ?,?,?,?,?,?,?,'uploading',? WHERE (SELECT COALESCE(SUM(size),0) FROM media_files120 WHERE actor=? AND state!='attached' AND created_at>?) + ? <= 1073741824").bind(p.id,room,actor,p.messageId,p.name,p.mime,p.size,now,actor,now-86400000,p.size).run();
-  const row=await db.prepare('SELECT * FROM media_files120 WHERE id=?').bind(p.id).first();if(!row)throw bad('resource-exhausted');
-  if(row.room!==room||row.actor!==actor||row.message_id!==p.messageId||row.size!==p.size||row.mime!==p.mime)throw bad('permission-denied');
-  if(!await mediaStub120(env,p.id).init(p.id,p.size,p.mime,p.grant))throw bad('permission-denied');
+ if(post&&(action==='start'||action==='photo')){
+  let data,info;
+  if(action==='photo'){
+   if(Number(request.headers.get('Content-Length'))>8*1048576+16384)throw bad('invalid-file');
+   const form=await request.formData();data=form.get('data');info=JSON.parse(form.get('info')||'null');
+   if(!info||!data||typeof data.arrayBuffer!=='function'||data.size!==info.size||data.size>8*1048576||!mediaTypes120.has(info.mime)||!info.mime.startsWith('image/'))throw bad('invalid-file');
+  }else info=await request.json();
+  const row=await reserveMedia121(env,room,actor,info),stub=mediaStub120(env,info.id);
+  if(data){
+   if(!await stub.storePhoto(info.id,info.size,info.mime,info.grant,await data.arrayBuffer()))throw bad('invalid-file');
+   await env.DB.prepare("UPDATE media_files120 SET state='ready' WHERE id=? AND state='uploading'").bind(info.id).run();
+   return json({ok:true});
+  }
+  if(!await stub.init(info.id,info.size,info.mime,info.grant))throw bad('permission-denied');
   return json({ok:true,chunk:CHUNK120,finished:row.state!=='uploading'});
  }
  if(action==='receipts'&&post){
