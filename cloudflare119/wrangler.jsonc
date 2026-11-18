@@ -7,7 +7,7 @@
     {
       "binding": "DB",
       "database_name": "course-secundus",
-      "database_id": "REQUIRES_CLOUDFLARE_DATABASE_ID"
+      "database_id": "ee9ece7b-d324-4324-96cb-04ce16118da6"
     }
   ],
   "durable_objects": {
