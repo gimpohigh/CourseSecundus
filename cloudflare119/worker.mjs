@@ -229,7 +229,7 @@ export async function verifyToken(token, fetcher = fetch) {
   return {uid:claims.sub, exp:claims.exp, admin:claims.admin === true};
 }
 async function primaryRead(path, token) {
-  const response = await fetch(PRIMARY + '/' + path + '.json?auth=' + encodeURIComponent(token), {signal:AbortSignal.timeout(12000)});
+  const response = await fetch(PRIMARY + '/' + path + '.json' + (token?'?auth='+encodeURIComponent(token):''), {signal:AbortSignal.timeout(12000)});
   if (!response.ok) throw bad(response.status === 401 || response.status === 403 ? 'permission-denied' : 'unavailable');
   return response.json();
 }
@@ -344,7 +344,8 @@ export class StudentStore {
       const statement = current.revision
         ? this.db.prepare('UPDATE student_data SET body=?, revision=revision+1, updated_at=? WHERE uid=? AND bucket=? AND revision=? AND NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(body,now,uid,bucket,current.revision,uid)
         : this.db.prepare('INSERT OR IGNORE INTO student_data (body,updated_at,uid,bucket,revision) SELECT ?,?,?,?,1 WHERE NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(body,now,uid,bucket,uid);
-      if ((await statement.run()).meta.changes) return {value,revision:current.revision+1,committed:true};
+      const writeResult=bucket==='selections' ? (await this.db.batch([statement,this.db.prepare('INSERT INTO primary_students120(uid,secondary_edited) SELECT ?,1 WHERE changes()>0 ON CONFLICT(uid) DO UPDATE SET secondary_edited=1').bind(uid)]))[0] : await statement.run();
+      if (writeResult.meta.changes) return {value,revision:current.revision+1,committed:true};
       await this.assertActive(uid);
     }
     throw bad('conflict');
@@ -385,6 +386,17 @@ export class RealtimeHub extends DurableObject {
       });
     }
     if(changed)await this.refreshStatistics119('primus');
+  }
+  async mirror120(rows){
+    const courses=await this.courses('',null);
+    for(const row of rows)await this.serial119(row.uid,async()=>{
+      const {uid,profile,account,slots,selection}=row;if(await this.env.DB.prepare('SELECT 1 FROM deleted_students WHERE uid=?').bind(uid).first())return;
+      const revision=Number(selection?.revision)||0,old=await this.env.DB.prepare('SELECT revision FROM primary_statistics_revisions WHERE uid=?').bind(uid).first();
+      const stale=old&&old.revision>revision;
+      if(!stale){const merged=await this.store.syncPrimary(uid,selection,courses);await this.store.updateStatistics(uid,'primus',selection,courses);await this.store.updateStatistics(uid,'secundus',merged.value,courses);}
+      await this.env.DB.prepare('INSERT INTO primary_students120(uid,profile,account,slots,primary_revision,synced_at) VALUES(?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET profile=excluded.profile,account=excluded.account,slots=excluded.slots,primary_revision=MAX(primary_revision,excluded.primary_revision),synced_at=excluded.synced_at WHERE excluded.synced_at>=synced_at').bind(uid,JSON.stringify(profile||null),JSON.stringify(account||null),JSON.stringify(slots||{}),revision,row.capturedAt).run();
+    });
+    await this.refreshStatistics119('primus');
   }
   async fetch(request) {
     if(request.headers.get('Upgrade')?.toLowerCase()!=='websocket')return new Response('WebSocket required',{status:426});
@@ -428,7 +440,9 @@ export class RealtimeHub extends DurableObject {
         await this.serial119(data.uid,async()=>{
           const courses=await this.courses(message.token,data.uid),primary=await this.primary119(data.uid,message.token,true);
           let selection=primary;
-          if(data.site==='secundus'){selection=(await this.store.syncPrimary(data.uid,primary,courses)).value;this.broadcast({type:'change',path:'v2/selections/'+data.uid},s=>s.uid===data.uid&&s.site==='secundus');}
+          const merged=await this.store.syncPrimary(data.uid,primary,courses);
+          if(data.site==='primus'){const secondary=await this.store.updateStatistics(data.uid,'secundus',merged.value,courses);if(secondary.changed)await this.refreshStatistics119('secundus');this.broadcast({type:'change',path:'v2/selections/'+data.uid},s=>s.uid===data.uid&&s.site==='secundus');}
+          if(data.site==='secundus'){selection=merged.value;this.broadcast({type:'change',path:'v2/selections/'+data.uid},s=>s.uid===data.uid&&s.site==='secundus');}
           const result=await this.store.updateStatistics(data.uid,data.site,selection,courses);this.send(ws,{id:message.id,ok:true,value:result});if(result.changed)await this.refreshStatistics119(data.site);
         });return;
       }
@@ -440,7 +454,7 @@ export class RealtimeHub extends DurableObject {
           const primary=await this.primary119(data.uid,message.token);
           await this.store.syncPrimary(data.uid,primary,courses);
           const result=message.type==='get'?await this.store.get(data.uid,path.bucket,path.child):await this.store.write(data.uid,path.bucket,path.child,message.value,message.type,message.expected,courses);
-          if(result.committed&&path.bucket==='selections'){const counts=await this.store.updateStatistics(data.uid,'secundus',result.value,courses);if(counts.changed)await this.refreshStatistics119('secundus');}
+          if(result.committed&&path.bucket==='selections'){const counts=await this.store.updateStatistics(data.uid,'secundus',result.value,courses);await this.refreshStatistics119('secundus');}
           return result;
         });
         if(path.child)result.value=result.value?.[path.child]??null;
@@ -465,7 +479,8 @@ export class RealtimeHub extends DurableObject {
 }
 
 export default {
-  async fetch(request,env) {
+  async scheduled(event,env){await cleanMedia120(env);}
+  ,async fetch(request,env) {
     const url=new URL(request.url),origin=request.headers.get('origin');
     const headers={'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'};
     if(origin===ORIGIN){headers['access-control-allow-origin']=ORIGIN;headers['vary']='Origin';headers['access-control-allow-headers']='Authorization, Content-Type';headers['access-control-allow-methods']='GET, POST, OPTIONS';}
@@ -473,8 +488,15 @@ export default {
     if(origin&&origin!==ORIGIN)return json({error:'forbidden-origin'},403);
     if(request.method==='OPTIONS')return new Response(null,{status:204,headers});
     try {
-      if(url.pathname==='/health'&&request.method==='GET') {await Promise.all(['student_data','deleted_students','statistics_members','statistics_counts'].map(table=>env.DB.prepare('SELECT 1 FROM '+table+' LIMIT 1').first()));if(!env.REALTIME)throw bad('realtime-not-configured');return json({ok:true,service:'CourseSecundus',version:'1.19',database:'D1',features:['baseline119','statistics119','delete119']});}
+      if(url.pathname==='/health'&&request.method==='GET') {await Promise.all(['student_data','deleted_students','statistics_members','statistics_counts','primary_students120','media_files120'].map(table=>env.DB.prepare('SELECT 1 FROM '+table+' LIMIT 1').first()));if(!env.REALTIME)throw bad('realtime-not-configured');return json({ok:true,service:'CourseSecundus',version:'1.20',database:'D1',features:['baseline119','statistics119','delete119','mirror120','media120']});}
       const hub=env.REALTIME.get(env.REALTIME.idFromName('school'));
+      if(url.pathname.startsWith('/media/'))return await mediaHttp120(request,env,url,json,headers);
+      if(url.pathname.startsWith('/service/')&&request.method==='POST'){
+        const scope=url.pathname.slice(9);if(!['mirror','claim','mail','remove'].includes(scope))throw bad('invalid-request');
+        const payload=await signed120(request,scope);
+        if(scope==='mirror'){if(!Array.isArray(payload)||payload.length>10||payload.some(r=>!keyOK(r.uid)||!Number.isSafeInteger(r.capturedAt)))throw bad('invalid-request');for(const row of payload)await hub.mirror120([row]);return json({ok:true,count:payload.length});}
+        return await mediaService120(env,scope,payload,json);
+      }
       if(url.pathname==='/live'&&request.method==='GET')return hub.fetch(request);
       if(url.pathname==='/admin/selection-rates'&&request.method==='POST'){
         const length=Number(request.headers.get('content-length'));if(length>90000)throw bad('invalid-request');
@@ -507,7 +529,12 @@ export default {
 StudentStore.prototype.syncPrimary = async function(uid,primary,courses){
  let current=await this.get(uid,'selections');if(!current.value)return this.seed(uid,primary,courses);
  const frozen=c=>!['3-1','3-2'].includes(c.sem),old=current.value,primaryIds=new Set(primary?.courses||[]),ownIds=new Set(old.courses||[]),track=primary?.sciTrack===true;
- const next={...old,sciTrack:track,courses:courses.filter(c=>c.req||track&&c.sciReq||(frozen(c)?primaryIds:ownIds).has(c.id)).map(c=>c.id),pinned:(old.pinned||[]).filter(id=>courses.some(c=>c.id===id&&!frozen(c)))};
+ let flags=await this.db.prepare('SELECT secondary_edited FROM primary_students120 WHERE uid=?').bind(uid).first();
+ if(!flags){
+  const customized=current.revision>1 && (old.pinned?.length>0 || Number(old.updatedAt)>Number(primary?.updatedAt||0) && courses.some(c=>!frozen(c)&&!c.req&&ownIds.has(c.id)!==primaryIds.has(c.id)));
+  await this.db.prepare('INSERT OR IGNORE INTO primary_students120(uid,secondary_edited) VALUES(?,?)').bind(uid,customized?1:0).run();flags={secondary_edited:customized};
+ }
+ const next={...old,sciTrack:track,courses:courses.filter(c=>c.req||track&&c.sciReq||(frozen(c)||!flags.secondary_edited?primaryIds:ownIds).has(c.id)).map(c=>c.id),pinned:(old.pinned||[]).filter(id=>courses.some(c=>c.id===id&&!frozen(c)))};
  if(JSON.stringify({...old,revision:0,updatedAt:0})===JSON.stringify({...next,revision:0,updatedAt:0}))return current;
  next.revision=old.revision+1;next.updatedAt=Date.now();
  const result=await this.db.prepare('UPDATE student_data SET body=?,revision=revision+1,updated_at=? WHERE uid=? AND bucket=? AND revision=? AND NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(JSON.stringify(next),next.updatedAt,uid,'selections',current.revision,uid).run();
@@ -534,7 +561,7 @@ StudentStore.prototype.updateStatisticsIds = async function(uid,site,ids,revisio
  if(remember)statements.push(remember);await this.db.batch(statements);return{eligible:valid,changed:true};
 };
 StudentStore.prototype.statistics = async function(site){
- const rows=(await this.db.prepare('SELECT course_id,total FROM statistics_counts WHERE site=? AND total>0').bind(site).all()).results;
+ const rows=site==='secundus'?(await this.db.prepare("SELECT j.value AS course_id,COUNT(*) AS total FROM statistics_members m LEFT JOIN primary_students120 p ON p.uid=m.uid,json_each(m.body) j WHERE (m.site='primus' AND COALESCE(p.secondary_edited,0)=0) OR (m.site='secundus' AND p.secondary_edited=1) GROUP BY j.value").all()).results:(await this.db.prepare('SELECT course_id,total FROM statistics_counts WHERE site=? AND total>0').bind(site).all()).results;
  return{totalUsers:Number(rows.find(r=>r.course_id==='__students__')?.total)||0,courses:Object.fromEntries(rows.filter(r=>r.course_id!=='__students__').map(r=>[r.course_id,Number(r.total)]))};
 };
 const purgeBefore119=StudentStore.prototype.purge;
@@ -545,6 +572,9 @@ StudentStore.prototype.purge=async function(uids){
  if(uids.length)await this.db.batch([
   this.db.prepare(`INSERT INTO statistics_counts(site,course_id,total) SELECT site,j.value,-COUNT(*) FROM statistics_members,json_each(body) AS j WHERE uid IN (${placeholders}) GROUP BY site,j.value ON CONFLICT(site,course_id) DO UPDATE SET total=statistics_counts.total+excluded.total`).bind(...uids),
   this.db.prepare(`DELETE FROM statistics_members WHERE uid IN (${placeholders})`).bind(...uids),
+  this.db.prepare("UPDATE media_files120 SET state='deleting' WHERE room IN ("+placeholders+") OR actor IN ("+placeholders+")").bind(...uids,...uids),
+  this.db.prepare("DELETE FROM media_ready120 WHERE room IN ("+placeholders+") OR viewer IN ("+placeholders+")").bind(...uids,...uids),
+  this.db.prepare('DELETE FROM primary_students120 WHERE uid IN ('+placeholders+')').bind(...uids),
   this.db.prepare(`DELETE FROM primary_statistics_revisions WHERE uid IN (${placeholders})`).bind(...uids)
  ]);
 };
@@ -553,9 +583,125 @@ RealtimeHub.prototype.serial119=function(uid,fn){
 };
 RealtimeHub.prototype.refreshStatistics119=function(site){
  this.statisticsPending119||=new Map();if(this.statisticsPending119.has(site))return this.statisticsPending119.get(site);
- const task=new Promise(resolve=>setTimeout(resolve,50)).then(async()=>{this.statisticsPending119.delete(site);const value=await this.store.statistics(site);this.broadcast({type:'statistics',site,value},s=>s.site===site);});this.statisticsPending119.set(site,task);return task;
+ const task=new Promise(resolve=>setTimeout(resolve,50)).then(async()=>{this.statisticsPending119.delete(site);const value=await this.store.statistics(site);this.broadcast({type:'statistics',site,value},s=>s.site===site);if(site==='primus')await this.refreshStatistics119('secundus');});this.statisticsPending119.set(site,task);return task;
 };
 RealtimeHub.prototype.primary119=async function(uid,token,force=false){
  this.baselines119||=new Map();const previous=this.baselines119.get(uid);if(!force&&previous&&previous.until>Date.now())return previous.value;
  const value=await primaryRead('v2/selections/'+uid,token);this.baselines119.set(uid,{value,until:Date.now()+2000});return value;
 };
+
+// Binary uploads use one private SQLite-backed Durable Object per file.
+const CHUNK120=768*1024, MAX_FILE120=128*1024*1024;
+const mediaId120=id=>typeof id==='string'&&/^[a-f0-9-]{36}$/.test(id);
+const mediaTypes120=new Set(['image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime','application/octet-stream']);
+function matchesMedia120(mime,b){
+ const ascii=(i,n)=>String.fromCharCode(...b.slice(i,i+n));
+ if(mime==='image/jpeg')return b[0]===255&&b[1]===216;
+ if(mime==='image/png')return b[0]===137&&ascii(1,3)==='PNG';
+ if(mime==='image/gif')return /^GIF8[79]a$/.test(ascii(0,6));
+ if(mime==='image/webp')return ascii(0,4)==='RIFF'&&ascii(8,4)==='WEBP';
+ if(mime==='video/webm')return [26,69,223,163].every((v,i)=>b[i]===v);
+ if(mime==='video/mp4'||mime==='video/quicktime')return ['ftyp','moov','mdat','wide','free','skip'].includes(ascii(4,4));
+ return mime==='application/octet-stream';
+}
+export class Attachment120 extends DurableObject {
+ constructor(ctx,env){super(ctx,env);this.ctx=ctx;this.env=env;this.sql=ctx.storage.sql;}
+ async init(id,size,mime,grant){
+  const meta=await this.ctx.storage.get('meta');if(meta)return meta.grant===grant&&meta.size===size;
+  this.sql.exec('CREATE TABLE IF NOT EXISTS pieces (n INTEGER PRIMARY KEY, data BLOB NOT NULL)');
+  await this.ctx.storage.put('meta',{id,size,mime,grant});await this.ctx.storage.setAlarm(Date.now()+86400000);return true;
+ }
+ async fetch(req){
+  const meta=await this.ctx.storage.get('meta');if(!meta||meta.finished||req.headers.get('authorization')!=='Upload '+meta.grant)return new Response(null,{status:403});
+  const url=new URL(req.url),n=Number(url.searchParams.get('n')),expected=Math.min(CHUNK120,meta.size-n*CHUNK120);
+  if(!Number.isInteger(n)||n<0||expected<=0||Number(req.headers.get('content-length'))>expected)return new Response(null,{status:400});
+  const buf=await req.arrayBuffer();if(buf.byteLength!==expected||n===0&&!matchesMedia120(meta.mime,new Uint8Array(buf)))return new Response(null,{status:400});
+  this.sql.exec('INSERT OR REPLACE INTO pieces(n,data) VALUES(?,?)',n,buf);return new Response(null,{status:204});
+ }
+ async finish(grant){const m=await this.ctx.storage.get('meta');if(!m||m.grant!==grant)return false;if(m.finished)return true;
+  if(this.sql.exec('SELECT COUNT(*) AS n FROM pieces').one().n!==Math.ceil(m.size/CHUNK120))return false;
+  await this.ctx.storage.put('meta',{...m,finished:true});return true;
+ }
+ async read(){
+  const meta=await this.ctx.storage.get('meta');if(!meta?.finished)return new Response(null,{status:404});
+  let n=0;const sql=this.sql,count=Math.ceil(meta.size/CHUNK120);
+  const stream=new ReadableStream({pull(controller){if(n===count){controller.close();return;}const row=sql.exec('SELECT data FROM pieces WHERE n=?',n++).one();controller.enqueue(new Uint8Array(row.data));}});
+  return new Response(stream,{headers:{'content-type':meta.mime,'content-length':String(meta.size),'cache-control':'private, no-store','x-content-type-options':'nosniff'}});
+ }
+ async destroy(){await this.ctx.storage.deleteAlarm();await this.ctx.storage.deleteAll();}
+ async alarm(){const m=await this.ctx.storage.get('meta');if(!m)return;
+  const row=await this.env.DB.prepare('SELECT state FROM media_files120 WHERE id=?').bind(m.id).first();
+  if(row?.state==='attached')return;
+  await this.env.DB.prepare("DELETE FROM media_files120 WHERE id=? AND state!='attached'").bind(m.id).run();
+  if(await this.env.DB.prepare("SELECT id FROM media_files120 WHERE id=? AND state='attached'").bind(m.id).first())return;
+  await this.destroy();
+ }
+}
+const mediaStub120=(env,id)=>env.MEDIA.get(env.MEDIA.idFromName(id));
+async function mediaScope120(request,env,room){
+ const token=(request.headers.get('authorization')||'').replace(/^Bearer /,''),user=await verifyToken(token);
+ if(!keyOK(room))throw bad('invalid-request');
+ if(user.uid!==room&&!user.admin){const roles=await Promise.all(['reportAdmins','studioAdmins'].map(k=>primaryRead('private/'+k+'/'+user.uid,token)));if(!roles.includes(true))throw bad('permission-denied');}
+ const gone=await env.DB.prepare('SELECT 1 FROM deleted_students WHERE uid IN (?,?) LIMIT 1').bind(room,user.uid).first();if(gone)throw bad('permission-denied');
+ return user.uid;
+}
+async function mediaHttp120(request,env,url,json,headers){
+ const action=url.pathname.slice('/media/'.length),room=url.searchParams.get('room'),id=url.searchParams.get('id'),post=request.method==='POST';
+ if(action==='part'&&post&&mediaId120(id)){const r=await mediaStub120(env,id).fetch(request);return new Response(null,{status:r.status,headers});}
+ if(action==='finish'&&post&&mediaId120(id)){
+  const grant=(request.headers.get('authorization')||'').replace(/^Upload /,'');
+  if(!await mediaStub120(env,id).finish(grant))throw bad('invalid-file');
+  await env.DB.prepare("UPDATE media_files120 SET state='ready' WHERE id=? AND state='uploading'").bind(id).run();return json({ok:true});
+ }
+ const actor=await mediaScope120(request,env,room);
+ if(action==='start'&&post){
+  const p=await request.json();if(!mediaId120(p.id)||!mediaId120(p.grant)||!keyOK(p.messageId)||!mediaTypes120.has(p.mime)||typeof p.name!=='string'||!p.name.trim()||p.name.length>120||/[\u0000-\u001f]/.test(p.name)||!Number.isSafeInteger(p.size)||p.size<1||p.size>MAX_FILE120)throw bad('invalid-file');
+  const db=env.DB,now=Date.now();const insert=await db.prepare("INSERT OR IGNORE INTO media_files120(id,room,actor,message_id,name,mime,size,state,created_at) SELECT ?,?,?,?,?,?,?,'uploading',? WHERE (SELECT COALESCE(SUM(size),0) FROM media_files120 WHERE actor=? AND state!='attached' AND created_at>?) + ? <= 1073741824").bind(p.id,room,actor,p.messageId,p.name,p.mime,p.size,now,actor,now-86400000,p.size).run();
+  const row=await db.prepare('SELECT * FROM media_files120 WHERE id=?').bind(p.id).first();if(!row)throw bad('resource-exhausted');
+  if(row.room!==room||row.actor!==actor||row.message_id!==p.messageId||row.size!==p.size||row.mime!==p.mime)throw bad('permission-denied');
+  if(!await mediaStub120(env,p.id).init(p.id,p.size,p.mime,p.grant))throw bad('permission-denied');
+  return json({ok:true,chunk:CHUNK120,finished:row.state!=='uploading'});
+ }
+ if(action==='receipt'&&keyOK(id)){
+  if(post)await env.DB.prepare('INSERT OR IGNORE INTO media_ready120(viewer,room,media_id) VALUES (?,?,?)').bind(actor,room,id).run();
+  else if(request.method!=='GET')throw bad('invalid-request');
+  const ready=post||!!await env.DB.prepare('SELECT 1 FROM media_ready120 WHERE viewer=? AND room=? AND media_id=?').bind(actor,room,id).first();return json({ok:true,ready});
+ }
+ if(action==='read'&&!post&&mediaId120(id)){
+  const file=await env.DB.prepare("SELECT * FROM media_files120 WHERE id=? AND room=? AND state='attached'").bind(id,room).first();if(!file)throw bad('permission-denied');
+  const result=await mediaStub120(env,id).read();return new Response(result.body,{status:result.status,headers:{...headers,'content-type':file.mime,'content-length':String(file.size),'content-disposition':'attachment','cache-control':'private, no-store'}});
+ }
+ throw bad('invalid-request');
+}
+async function signed120(request,action){
+ const raw=await request.text();if(raw.length>1800000)throw bad('invalid-request');
+ const {payload,expires,signature}=JSON.parse(raw);if(typeof payload!=='string'||!Number.isSafeInteger(expires)||expires<Date.now()||expires>Date.now()+300000||!/^[a-f0-9]{64}$/.test(signature||''))throw bad('permission-denied');
+ const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(payload))),n=>n.toString(16).padStart(2,'0')).join('');
+ const r=await fetch(GAS,{method:'POST',headers:{'content-type':'text/plain'},body:JSON.stringify({action:'checkService120',scope:action,hash,expires,signature})});
+ const v=await r.json();if(!v.ok||v.result?.allowed!==true)throw bad('permission-denied');return JSON.parse(payload);
+}
+async function mediaService120(env,scope,p,json){
+ if(!keyOK(p.room))throw bad('invalid-request');
+ const db=env.DB;
+ if(scope==='claim'){
+  if(!keyOK(p.actor)||!keyOK(p.messageId)||!Array.isArray(p.ids)||p.ids.length<1||p.ids.length>30||new Set(p.ids).size!==p.ids.length||p.ids.some(x=>!mediaId120(x)))throw bad('invalid-file');
+  const placeholders=p.ids.map(()=>'?').join(',');
+  const rows=(await db.prepare('SELECT * FROM media_files120 WHERE room=? AND actor=? AND message_id=? AND id IN ('+placeholders+')').bind(p.room,p.actor,p.messageId,...p.ids).all()).results;
+  if(rows.length!==p.ids.length||rows.some(r=>!['ready','attached'].includes(r.state))||rows.reduce((n,r)=>n+r.size,0)>512*1048576)throw bad('invalid-file');
+  await db.prepare("UPDATE media_files120 SET state='attached' WHERE room=? AND actor=? AND message_id=? AND id IN ("+placeholders+')').bind(p.room,p.actor,p.messageId,...p.ids).run();
+  return json({ok:true,images:p.ids.map(id=>{const f=rows.find(r=>r.id===id);return{mediaId:id,room:p.room,name:f.name,mime:f.mime,size:f.size};})});
+ }
+ if(scope==='mail'){
+  if(!mediaId120(p.id)||!keyOK(p.messageId))throw bad('invalid-request');
+  const row=await db.prepare("SELECT size FROM media_files120 WHERE room=? AND id=? AND message_id=? AND state='attached'").bind(p.room,p.id,p.messageId).first();if(!row||row.size>8*1048576)throw bad('permission-denied');
+  return mediaStub120(env,p.id).read();
+ }
+ if(scope==='remove'){
+  if(!Array.isArray(p.ids)||p.ids.length>30||p.ids.some(id=>!mediaId120(id)))throw bad('invalid-request');
+  for(const id of p.ids){const result=await db.prepare('DELETE FROM media_files120 WHERE room=? AND id=?').bind(p.room,id).run();if(result.meta.changes){await mediaStub120(env,id).destroy();await db.prepare('DELETE FROM media_ready120 WHERE room=? AND media_id=?').bind(p.room,id).run();}}
+  return json({ok:true});
+ }
+ throw bad('invalid-request');
+}
+
+async function cleanMedia120(env){const rows=(await env.DB.prepare("SELECT id FROM media_files120 WHERE state='deleting' LIMIT 20").all()).results;for(const row of rows){await mediaStub120(env,row.id).destroy();await env.DB.prepare("DELETE FROM media_files120 WHERE id=? AND state='deleting'").bind(row.id).run();}}
