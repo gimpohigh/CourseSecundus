@@ -47,6 +47,7 @@ function create({auth,endpoint,site,primaryURL='https://gimpo-monitoring-default
      if(ws!==socket)return;if(event.data==='pong')return;
      let message;try{message=JSON.parse(event.data);}catch{return;}
      if(message.id&&pending.has(message.id)){const entry=pending.get(message.id);pending.delete(message.id);clearTimeout(entry.timer);message.ok?entry.resolve(message):entry.reject(fault(message.error?.code||'unavailable',message.error?.message));}
+     else if(message.type==='statistics'){for(const listener of statisticsListeners)listener.success(message.value);}
      else if(message.type==='presence'){counts=message.counts;deliverPresence();}
      else if(message.type==='change')refreshWhere(ref=>ref.store==='secondary'&&(ref.path===message.path||ref.path.startsWith(message.path+'/')));
      else if(message.type==='invalidate')refreshWhere(ref=>ref.store==='primary'&&!ref.path.startsWith('.info/'));
@@ -55,7 +56,7 @@ function create({auth,endpoint,site,primaryURL='https://gimpo-monitoring-default
    });
    await sendRaw({type:'auth',token,site,device:deviceId},ws);
    if(epoch!==generation||auth.currentUser?.uid!==owner.uid){ws.close();throw fault('account-changed');}
-   ready=true;user=owner;retries=0;info();refreshWhere(ref=>!ref.path.startsWith('.info/'));
+   ready=true;user=owner;retries=0;info();if(statisticsListeners.size)sendRaw({type:'statisticsGet',token}).then(r=>{for(const l of statisticsListeners)l.success(r.value);}).catch(e=>{for(const l of statisticsListeners)l.failure?.(e);});refreshWhere(ref=>!ref.path.startsWith('.info/'));
   })();connecting=task;
   try{await task;}catch(error){scheduleReconnect();throw error;}finally{if(connecting===task)connecting=null;}
  }
@@ -105,6 +106,7 @@ function create({auth,endpoint,site,primaryURL='https://gimpo-monitoring-default
   push(value){const ref=this.child(pushKey());if(value!==undefined){const saved=ref.set(value);ref.then=(a,b)=>saved.then(()=>new Ref(ref.store,ref.path)).then(a,b);}return ref;}
   async transaction(fn,callback){try{for(let attempt=0;attempt<8;attempt++){const before=await read(this);if(this.store==='primary'&&typeof before.revision!=='string')throw fault('unavailable','서버의 저장 버전을 확인하지 못해 덮어쓰기를 중단했습니다.');const next=fn(copy(before.value));if(next===undefined){const result={committed:false,snapshot:new Snapshot(before.value,this.key)};callback?.(null,false,result.snapshot);return result;}const saved=await write(this,'put',next,before.revision);if(saved.committed){const result={committed:true,snapshot:new Snapshot(saved.value,this.key)};callback?.(null,true,result.snapshot);return result;}}throw fault('conflict','다른 기기의 변경과 충돌했습니다.');}catch(error){callback?.(error,false,null);throw error;}}
  }
+ const statisticsListeners=new Set();
  const primary={ref:path=>new Ref('primary',path),goOffline(){},goOnline(){connect().catch(()=>{});}},secondary={ref:path=>new Ref('secondary',path)};
  const presence=options=>{presenceListeners.add(options);deliverPresence();connect().catch(error=>options.onError?.('connection',error));return{remove(){presenceListeners.delete(options);return Promise.resolve();}};};
  primary.coursePresence=secondary.coursePresence=presence;
@@ -116,7 +118,7 @@ function create({auth,endpoint,site,primaryURL='https://gimpo-monitoring-default
  // Reconcile changes made outside these pages (for example, approval from an email).
  const reconcile=setInterval(()=>{if(events.document?.visibilityState!=='hidden')refreshWhere(ref=>ref.store==='primary'&&!ref.path.startsWith('.info/'));},60000);
  const wake=()=>{connect().then(()=>refreshWhere(ref=>!ref.path.startsWith('.info/'))).catch(()=>{});};events.addEventListener('online',wake);events.addEventListener('focus',wake);
- return{primary,secondary,notify,connect,presence,close(){disposed=true;generation++;stopAuth();clearInterval(heartbeat);clearInterval(reconcile);clearTimeout(retryTimer);events.removeEventListener('online',wake);events.removeEventListener('focus',wake);const old=socket;socket=null;old?.close();watchers.clear();presenceListeners.clear();rejectPending(fault('closed'));}};
+ return{primary,secondary,notify,connect,presence,syncBaseline:()=>rpc({type:'syncBaseline'}),publishSelection:()=>rpc({type:'statisticsPublish'}),watchStatistics(success,failure){const listener={success,failure};statisticsListeners.add(listener);rpc({type:'statisticsGet'}).then(r=>{if(statisticsListeners.has(listener))success(r.value);}).catch(error=>{if(statisticsListeners.has(listener))failure?.(error);});return()=>statisticsListeners.delete(listener);},close(){disposed=true;generation++;stopAuth();clearInterval(heartbeat);clearInterval(reconcile);clearTimeout(retryTimer);events.removeEventListener('online',wake);events.removeEventListener('focus',wake);const old=socket;socket=null;old?.close();watchers.clear();presenceListeners.clear();statisticsListeners.clear();rejectPending(fault('closed'));}};
 }
 let lastTime=0,lastRandom=[];
 function pushKey(){const chars='-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz';let time=Date.now(),same=time===lastTime;lastTime=time;const out=Array(8);for(let i=7;i>=0;i--){out[i]=chars[time%64];time=Math.floor(time/64);}if(!same)lastRandom=Array.from(crypto.getRandomValues(new Uint8Array(12)),v=>v%64);else{let i=11;for(;i>=0&&lastRandom[i]===63;i--)lastRandom[i]=0;if(i>=0)lastRandom[i]++;}return out.join('')+lastRandom.map(i=>chars[i]).join('');}
