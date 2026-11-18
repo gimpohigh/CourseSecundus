@@ -15,6 +15,10 @@
       {
         "name": "REALTIME",
         "class_name": "RealtimeHub"
+      },
+      {
+        "name": "MEDIA",
+        "class_name": "Attachment120"
       }
     ]
   },
@@ -24,9 +28,20 @@
       "new_sqlite_classes": [
         "RealtimeHub"
       ]
+    },
+    {
+      "tag": "v120",
+      "new_sqlite_classes": [
+        "Attachment120"
+      ]
     }
   ],
   "observability": {
     "enabled": false
+  },
+  "triggers": {
+    "crons": [
+      "*/15 * * * *"
+    ]
   }
 }
