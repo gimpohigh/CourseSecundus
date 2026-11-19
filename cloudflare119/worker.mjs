@@ -190,7 +190,7 @@ const PROJECT = 'gimpo-monitoring';
 const PRIMARY = 'https://gimpo-monitoring-default-rtdb.firebaseio.com';
 const ORIGIN = 'https://gimpohigh.github.io';
 const GAS = 'https://script.google.com/macros/s/AKfycbzHSzopZm8oQcPGqSmteuCJKanULIptcelUfvqG9OgGlz4vD019ZgndZnYNwGZy9EcMoA/exec';
-const BUCKETS = new Set(['selections', 'slots', 'aiHistory', 'recommendations']);
+const BUCKETS = new Set(['selections', 'slots', 'aiHistory', 'recommendations', 'sciencePrompt']);
 const bad = (code, message = code) => Object.assign(new Error(message), {code});
 const clone = value => value == null ? null : JSON.parse(JSON.stringify(value));
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -253,13 +253,18 @@ export function resolveTimestamps(value, now = Date.now(), depth = 0) {
   }
   return out;
 }
+function hasScienceFoundation(ids,courses) {
+  const required=courses.filter(c=>c.sem==='2-1'&&c.sciReq);
+  return required.length>0&&required.every(c=>ids.has(c.id));
+}
 export function stateValue(input, baseline, courses, metadata = []) {
   if (!plain(input) || Object.keys(input).some(k => !['courses','pinned','sciTrack',...metadata].includes(k)) ||
       !Array.isArray(input.courses) || !Array.isArray(input.pinned) || typeof input.sciTrack !== 'boolean') throw bad('invalid-state');
   const known = new Map(courses.map(c => [c.id,c])), frozen = id => !['3-1','3-2'].includes(known.get(id)?.sem);
   for (const ids of [input.courses,input.pinned]) if (ids.length > 300 || new Set(ids).size !== ids.length || ids.some(id => !known.has(id))) throw bad('invalid-state');
   const fixed = (baseline?.courses || []).filter(id => known.has(id) && frozen(id)).sort();
-  if (JSON.stringify(input.courses.filter(frozen).sort()) !== JSON.stringify(fixed) || input.sciTrack !== baseline.sciTrack || input.pinned.some(frozen)) throw bad('locked-semester', '2학년 과목은 변경할 수 없습니다.');
+  if (JSON.stringify(input.courses.filter(frozen).sort()) !== JSON.stringify(fixed) || input.pinned.some(frozen)) throw bad('locked-semester', '2학년 과목은 변경할 수 없습니다.');
+  if(input.sciTrack&&!baseline.sciTrack&&!hasScienceFoundation(new Set(fixed),courses))throw bad('locked-semester', '2학년 1학기에 기초 과학 네 과목을 모두 선택해야 과학 중점 과정을 신청할 수 있습니다.');
   if (courses.some(c => c.req && !input.courses.includes(c.id))) throw bad('invalid-state');
   return input;
 }
@@ -303,13 +308,20 @@ export class StudentStore {
   async seed(uid,value,courses) {
     await this.assertActive(uid);
     const ids = new Set(Array.isArray(value?.courses) ? value.courses : []);
-    courses.filter(c => c.req || value?.sciTrack && c.sciReq).forEach(c => ids.add(c.id));
-    const normalized = {courses:courses.filter(c => ids.has(c.id)).map(c => c.id), pinned:[], sciTrack:value?.sciTrack === true, revision:1, updatedAt:Date.now()};
+    courses.filter(c => c.req).forEach(c => ids.add(c.id));
+    const normalized = {courses:courses.filter(c => ids.has(c.id)).map(c => c.id), pinned:[], sciTrack:value?.sciTrack === true && hasScienceFoundation(ids,courses), revision:1, updatedAt:Date.now()};
     await this.db.prepare('INSERT OR IGNORE INTO student_data (uid,bucket,body,revision,updated_at) SELECT ?,?,?,1,? WHERE NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(uid,'selections',JSON.stringify(normalized),Date.now(),uid).run();
     return this.get(uid,'selections');
   }
   async write(uid,bucket,child,input,method,expected,courses) {
     await this.assertActive(uid);
+    if(bucket==='sciencePrompt') {
+      const day=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
+      if(child||method!=='put'||!plain(input)||input.day!==day||Object.keys(input).length!==1)throw bad('invalid-data');
+      const statement=this.db.prepare("INSERT INTO student_data(uid,bucket,body,revision,updated_at) SELECT ?,?,?,1,? WHERE NOT EXISTS(SELECT 1 FROM deleted_students WHERE uid=?) ON CONFLICT(uid,bucket) DO UPDATE SET body=excluded.body,revision=student_data.revision+1,updated_at=excluded.updated_at WHERE body<>excluded.body");
+      await statement.bind(uid,bucket,JSON.stringify({day}),Date.now(),uid).run();
+      return {...await this.get(uid,bucket),committed:true};
+    }
     if(bucket==='aiHistory') {
       if(expected!==undefined)throw bad('unsupported-transaction');
       let updates;
@@ -344,7 +356,14 @@ export class StudentStore {
       const statement = current.revision
         ? this.db.prepare('UPDATE student_data SET body=?, revision=revision+1, updated_at=? WHERE uid=? AND bucket=? AND revision=? AND NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(body,now,uid,bucket,current.revision,uid)
         : this.db.prepare('INSERT OR IGNORE INTO student_data (body,updated_at,uid,bucket,revision) SELECT ?,?,?,?,1 WHERE NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(body,now,uid,bucket,uid);
-      const writeResult=bucket==='selections' ? (await this.db.batch([statement,this.db.prepare('INSERT INTO primary_students120(uid,secondary_edited) SELECT ?,1 WHERE changes()>0 ON CONFLICT(uid) DO UPDATE SET secondary_edited=1').bind(uid)]))[0] : await statement.run();
+      let writeResult;
+      if(bucket==='selections'){
+        const writes=[statement,this.db.prepare('INSERT INTO primary_students120(uid,secondary_edited) SELECT ?,1 WHERE changes()>0 ON CONFLICT(uid) DO UPDATE SET secondary_edited=1').bind(uid)];
+        if(value.sciTrack!==baseline.sciTrack){
+          writes.push(this.db.prepare("INSERT INTO student_data(uid,bucket,body,revision,updated_at) SELECT ?,'scienceChoice122',?,1,? WHERE changes()>0 ON CONFLICT(uid,bucket) DO UPDATE SET body=excluded.body,revision=student_data.revision+1,updated_at=excluded.updated_at").bind(uid,JSON.stringify(value.sciTrack),now));
+        }
+        [writeResult]=await this.db.batch(writes);
+      }else writeResult=await statement.run();
       if (writeResult.meta.changes) return {value,revision:current.revision+1,committed:true};
       await this.assertActive(uid);
     }
@@ -449,8 +468,12 @@ export class RealtimeHub extends DurableObject {
       if(message.type==='get'||message.type==='put'||message.type==='patch') {
         const path=parsePath(message.path,data.uid),tokenAuth=await verifyToken(message.token);
         if(tokenAuth.uid!==data.uid)throw bad('account-changed');
-        const courses=await this.courses(message.token,data.uid);
         const result=await this.serial119(data.uid,async()=>{
+          // These account-owned values are independent of the course catalogue and baseline.
+          if(path.bucket==='sciencePrompt'||(message.type==='get'&&path.bucket==='slots')){
+            return message.type==='get'?this.store.get(data.uid,path.bucket,path.child):this.store.write(data.uid,path.bucket,path.child,message.value,message.type,message.expected);
+          }
+          const courses=await this.courses(message.token,data.uid);
           const primary=await this.primary119(data.uid,message.token);
           await this.store.syncPrimary(data.uid,primary,courses);
           const result=message.type==='get'?await this.store.get(data.uid,path.bucket,path.child):await this.store.write(data.uid,path.bucket,path.child,message.value,message.type,message.expected,courses);
@@ -488,7 +511,7 @@ export default {
     if(origin&&origin!==ORIGIN)return json({error:'forbidden-origin'},403);
     if(request.method==='OPTIONS')return new Response(null,{status:204,headers});
     try {
-      if(url.pathname==='/health'&&request.method==='GET') {await Promise.all(['student_data','deleted_students','statistics_members','statistics_counts','primary_students120','media_files120'].map(table=>env.DB.prepare('SELECT 1 FROM '+table+' LIMIT 1').first()));if(!env.REALTIME)throw bad('realtime-not-configured');return json({ok:true,service:'CourseSecundus',version:'1.21',database:'D1',features:['baseline119','statistics119','delete119','mirror120','media120','photo121']});}
+      if(url.pathname==='/health'&&request.method==='GET') {await Promise.all(['student_data','deleted_students','statistics_members','statistics_counts','primary_students120','media_files120'].map(table=>env.DB.prepare('SELECT 1 FROM '+table+' LIMIT 1').first()));if(!env.REALTIME)throw bad('realtime-not-configured');return json({ok:true,service:'CourseSecundus',version:'1.22',database:'D1',features:['baseline119','statistics119','delete119','mirror120','media120','photo121','science122']});}
       const hub=env.REALTIME.get(env.REALTIME.idFromName('school'));
       if(url.pathname.startsWith('/media/'))return await mediaHttp120(request,env,url,json,headers);
       if(url.pathname.startsWith('/service/')&&request.method==='POST'){
@@ -528,13 +551,14 @@ export default {
 // Merge only immutable terms from the verified primary record; retain grade-three work.
 StudentStore.prototype.syncPrimary = async function(uid,primary,courses){
  let current=await this.get(uid,'selections');if(!current.value)return this.seed(uid,primary,courses);
- const frozen=c=>!['3-1','3-2'].includes(c.sem),old=current.value,primaryIds=new Set(primary?.courses||[]),ownIds=new Set(old.courses||[]),track=primary?.sciTrack===true;
- let flags=await this.db.prepare('SELECT secondary_edited FROM primary_students120 WHERE uid=?').bind(uid).first();
+ const frozen=c=>!['3-1','3-2'].includes(c.sem),old=current.value,primaryIds=new Set(primary?.courses||[]),ownIds=new Set(old.courses||[]);
+ let flags=await this.db.prepare("SELECT p.secondary_edited,(SELECT body FROM student_data WHERE uid=p.uid AND bucket='scienceChoice122') AS choice FROM primary_students120 p WHERE p.uid=?").bind(uid).first();
  if(!flags){
   const customized=current.revision>1 && (old.pinned?.length>0 || Number(old.updatedAt)>Number(primary?.updatedAt||0) && courses.some(c=>!frozen(c)&&!c.req&&ownIds.has(c.id)!==primaryIds.has(c.id)));
   await this.db.prepare('INSERT OR IGNORE INTO primary_students120(uid,secondary_edited) VALUES(?,?)').bind(uid,customized?1:0).run();flags={secondary_edited:customized};
  }
- const next={...old,sciTrack:track,courses:courses.filter(c=>c.req||track&&c.sciReq||(frozen(c)||!flags.secondary_edited?primaryIds:ownIds).has(c.id)).map(c=>c.id),pinned:(old.pinned||[]).filter(id=>courses.some(c=>c.id===id&&!frozen(c)))};
+ const track=hasScienceFoundation(primaryIds,courses)&&(flags.choice==null?primary?.sciTrack===true:flags.choice==='true');
+ const next={...old,sciTrack:track,courses:courses.filter(c=>c.req||(frozen(c)||!flags.secondary_edited?primaryIds:ownIds).has(c.id)).map(c=>c.id),pinned:(old.pinned||[]).filter(id=>courses.some(c=>c.id===id&&!frozen(c)))};
  if(JSON.stringify({...old,revision:0,updatedAt:0})===JSON.stringify({...next,revision:0,updatedAt:0}))return current;
  next.revision=old.revision+1;next.updatedAt=Date.now();
  const result=await this.db.prepare('UPDATE student_data SET body=?,revision=revision+1,updated_at=? WHERE uid=? AND bucket=? AND revision=? AND NOT EXISTS (SELECT 1 FROM deleted_students WHERE uid=?)').bind(JSON.stringify(next),next.updatedAt,uid,'selections',current.revision,uid).run();
