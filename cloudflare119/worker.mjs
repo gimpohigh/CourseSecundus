@@ -55,10 +55,10 @@ const DATA = {"version":"2026-1-v2","courses":[{"id":"11_01","sem":"1-1","name":
     const labels={kor:'국어',math:'수학',eng:'영어',his:'한국사',soc:'사회',sci:'과학',pe:'체육',art:'예술',etc:'정보·제2외국어·한문·교양'};
     for(const [key,min]of Object.entries(minima))if(totals[key]<min)errors.push(labels[key]+' 최소 '+min+'학점을 충족하지 못했습니다. (현재 '+totals[key]+'학점)');
     if(input.sciTrack===true){
-      if(baseScience.some(id=>!chosen.has(id)))errors.push('과학중점 과정은 물리학·화학·생명과학·지구과학이 모두 필요합니다.');
-      if(advanced<6)errors.push('과학중점 심화 지정 과목은 6과목 이상이어야 합니다. (현재 '+advanced+'과목)');
-      if(totals.msi<79)errors.push('과학중점 수학·과학·정보 합계는 79학점 이상이어야 합니다. (현재 '+totals.msi+'학점)');
-      if(mathElectives<4)warnings.push('과학중점 과정은 수학 선택과목 4과목 이상을 권장합니다.');
+      if(baseScience.some(id=>!chosen.has(id)))errors.push('과학 중점 과정은 물리학 ·화학 · 생명과학 · 지구과학이 모두 필요합니다.');
+      if(advanced<6)errors.push('과학 중점 심화 지정 과목은 6과목 이상이어야 합니다. (현재 '+advanced+'과목)');
+      if(totals.msi<79)errors.push('과학 중점 수학·과학·정보 합계는 79학점 이상이어야 합니다. (현재 '+totals.msi+'학점)');
+      if(mathElectives<4)warnings.push('과학 중점 과정은 수학 선택과목 4과목 이상을 권장합니다.');
     }
     const links=[['21_s09',['22_s09'],'역학과 에너지'],['21_s10',['22_s10'],'물질과 에너지'],['21_s11',['22_s11'],'세포와 물질대사'],['21_s12',['22_s12'],'지구시스템 과학'],['21_s09',['31_s09','32_s08'],'전자기와 양자'],['21_s10',['31_s10','32_s09'],'화학 반응의 세계'],['21_s11',['31_s11','32_s10'],'생물의 유전'],['21_s12',['31_s12','32_s11'],'행성우주과학']];
     for(const [base,advancedIds,name]of links)if(!chosen.has(base)&&advancedIds.some(id=>chosen.has(id)))warnings.push(name+((name.charCodeAt(name.length-1)-0xAC00)%28===0?'는 ':'은 ')+byId.get(base).name+'과 연계되므로 '+byId.get(base).name+'을 듣는 것을 권장드립니다.');
@@ -190,7 +190,7 @@ const PROJECT = 'gimpo-monitoring';
 const PRIMARY = 'https://gimpo-monitoring-default-rtdb.firebaseio.com';
 const ORIGIN = 'https://gimpohigh.github.io';
 const GAS = 'https://script.google.com/macros/s/AKfycbzHSzopZm8oQcPGqSmteuCJKanULIptcelUfvqG9OgGlz4vD019ZgndZnYNwGZy9EcMoA/exec';
-const BUCKETS = new Set(['selections', 'slots', 'aiHistory', 'recommendations', 'sciencePrompt']);
+const BUCKETS = new Set(['selections', 'slots', 'aiHistory', 'recommendations', 'sciencePrompt', 'slotOrder']);
 const bad = (code, message = code) => Object.assign(new Error(message), {code});
 const clone = value => value == null ? null : JSON.parse(JSON.stringify(value));
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -315,6 +315,16 @@ export class StudentStore {
   }
   async write(uid,bucket,child,input,method,expected,courses) {
     await this.assertActive(uid);
+    if(bucket==='slotOrder') {
+      if(child||method!=='put'||!plain(input)||Object.keys(input).length!==1||!Array.isArray(input.keys)||input.keys.length>120||
+        new Set(input.keys).size!==input.keys.length||input.keys.some(k=>typeof k!=='string'||! /^(?:primus|secundus):[A-Za-z0-9_-]{1,128}$/.test(k)))throw bad('invalid-data');
+      const current=await this.get(uid,bucket);
+      if(expected!==undefined&&expected!==current.revision)return {...current,committed:false};
+      const body=JSON.stringify({keys:input.keys}),now=Date.now();
+      const sql=this.db.prepare('INSERT INTO student_data(uid,bucket,body,revision,updated_at) SELECT ?,?,?,1,? WHERE NOT EXISTS(SELECT 1 FROM deleted_students WHERE uid=?) ON CONFLICT(uid,bucket) DO UPDATE SET body=excluded.body,revision=student_data.revision+1,updated_at=excluded.updated_at WHERE student_data.revision=?');
+      const result=await sql.bind(uid,bucket,body,now,uid,current.revision).run();
+      return {...await this.get(uid,bucket),committed:result.meta.changes===1};
+    }
     if(bucket==='sciencePrompt') {
       const day=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
       if(child||method!=='put'||!plain(input)||input.day!==day||Object.keys(input).length!==1)throw bad('invalid-data');
@@ -407,12 +417,12 @@ export class RealtimeHub extends DurableObject {
     if(changed)await this.refreshStatistics119('primus');
   }
   async mirror120(rows){
-    const courses=await this.courses('',null);
+    const tables=await this.gradeCatalogues(''),courses=tables.secundus;
     for(const row of rows)await this.serial119(row.uid,async()=>{
       const {uid,profile,account,slots,selection}=row;if(await this.env.DB.prepare('SELECT 1 FROM deleted_students WHERE uid=?').bind(uid).first())return;
       const revision=Number(selection?.revision)||0,old=await this.env.DB.prepare('SELECT revision FROM primary_statistics_revisions WHERE uid=?').bind(uid).first();
       const stale=old&&old.revision>revision;
-      if(!stale){const merged=await this.store.syncPrimary(uid,selection,courses);await this.store.updateStatistics(uid,'primus',selection,courses);await this.store.updateStatistics(uid,'secundus',merged.value,courses);}
+      if(!stale){const merged=await this.store.syncPrimary(uid,selection,courses);await this.store.updateStatistics(uid,'primus',selection,tables.primus);await this.store.updateStatistics(uid,'secundus',merged.value,courses);}
       await this.env.DB.prepare('INSERT INTO primary_students120(uid,profile,account,slots,primary_revision,synced_at) VALUES(?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET profile=excluded.profile,account=excluded.account,slots=excluded.slots,primary_revision=MAX(primary_revision,excluded.primary_revision),synced_at=excluded.synced_at WHERE excluded.synced_at>=synced_at').bind(uid,JSON.stringify(profile||null),JSON.stringify(account||null),JSON.stringify(slots||{}),revision,row.capturedAt).run();
     });
     await this.refreshStatistics119('primus');
@@ -423,12 +433,17 @@ export class RealtimeHub extends DurableObject {
     this.save(server,{joinedAt:Date.now()});await this.ctx.storage.setAlarm(Date.now()+15000);
     return new Response(null,{status:101,webSocket:client});
   }
-  async courses(token,uid) {
+  async gradeCatalogues(token) {
     const cached=this.catalogues.get('public');if(cached&&cached.until>Date.now())return cached.value;
-    const record=await primaryRead('v2/siteContent/course',token);let courses=BASE_COURSES;
-    if(record?.dataJSON) {const custom=JSON.parse(record.dataJSON)?.catalogue;if(custom&&typeof custom==='object')courses=BASE_COURSES.map(c=>({...c,...custom[c.id]}));}
-    if(!Array.isArray(courses)||courses.length>300||courses.some(c=>!keyOK(c.id)||!['1-1','1-2','2-1','2-2','3-1','3-2'].includes(c.sem)))throw bad('invalid-catalogue');
-    this.catalogues.set('public',{value:courses,until:Date.now()+30000});return courses;
+    const record=await primaryRead('v2/siteContent/course',token);
+    const build=entry=>{
+      const custom=entry?.dataJSON?JSON.parse(entry.dataJSON)?.catalogue:null;
+      const courses=custom?BASE_COURSES.map(c=>({...c,...custom[c.id]})):BASE_COURSES;
+      if(courses.length>300||courses.some(c=>!keyOK(c.id)||!['1-1','1-2','2-1','2-2','3-1','3-2'].includes(c.sem)))throw bad('invalid-catalogue');
+      return courses;
+    };
+    const primus=build(record),secundus=record?.grade2?build(record.grade2):primus,value={primus,secundus};
+    this.catalogues.set('public',{value,until:Date.now()+30000});return value;
   }
   async webSocketMessage(ws,raw) {
     let message;
@@ -457,12 +472,12 @@ export class RealtimeHub extends DurableObject {
         const verified=await verifyToken(message.token);if(verified.uid!==data.uid)throw bad('account-changed');
         if(message.type==='statisticsGet'){this.send(ws,{id:message.id,ok:true,value:await this.store.statistics(data.site)});return;}
         await this.serial119(data.uid,async()=>{
-          const courses=await this.courses(message.token,data.uid),primary=await this.primary119(data.uid,message.token,true);
+          const tables=await this.gradeCatalogues(message.token),courses=tables.secundus,primary=await this.primary119(data.uid,message.token,true);
           let selection=primary;
           const merged=await this.store.syncPrimary(data.uid,primary,courses);
           if(data.site==='primus'){const secondary=await this.store.updateStatistics(data.uid,'secundus',merged.value,courses);if(secondary.changed)await this.refreshStatistics119('secundus');this.broadcast({type:'change',path:'v2/selections/'+data.uid},s=>s.uid===data.uid&&s.site==='secundus');}
           if(data.site==='secundus'){selection=merged.value;this.broadcast({type:'change',path:'v2/selections/'+data.uid},s=>s.uid===data.uid&&s.site==='secundus');}
-          const result=await this.store.updateStatistics(data.uid,data.site,selection,courses);this.send(ws,{id:message.id,ok:true,value:result});if(result.changed)await this.refreshStatistics119(data.site);
+          const result=await this.store.updateStatistics(data.uid,data.site,selection,tables[data.site]||courses);this.send(ws,{id:message.id,ok:true,value:result});if(result.changed)await this.refreshStatistics119(data.site);
         });return;
       }
       if(message.type==='get'||message.type==='put'||message.type==='patch') {
@@ -470,10 +485,10 @@ export class RealtimeHub extends DurableObject {
         if(tokenAuth.uid!==data.uid)throw bad('account-changed');
         const result=await this.serial119(data.uid,async()=>{
           // These account-owned values are independent of the course catalogue and baseline.
-          if(path.bucket==='sciencePrompt'||(message.type==='get'&&path.bucket==='slots')){
+          if(path.bucket==='sciencePrompt'||path.bucket==='slotOrder'||(message.type==='get'&&path.bucket==='slots')){
             return message.type==='get'?this.store.get(data.uid,path.bucket,path.child):this.store.write(data.uid,path.bucket,path.child,message.value,message.type,message.expected);
           }
-          const courses=await this.courses(message.token,data.uid);
+          const courses=(await this.gradeCatalogues(message.token)).secundus;
           const primary=await this.primary119(data.uid,message.token);
           await this.store.syncPrimary(data.uid,primary,courses);
           const result=message.type==='get'?await this.store.get(data.uid,path.bucket,path.child):await this.store.write(data.uid,path.bucket,path.child,message.value,message.type,message.expected,courses);
