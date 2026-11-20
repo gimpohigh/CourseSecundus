@@ -55,7 +55,7 @@ const DATA = {"version":"2026-1-v2","courses":[{"id":"11_01","sem":"1-1","name":
     const labels={kor:'국어',math:'수학',eng:'영어',his:'한국사',soc:'사회',sci:'과학',pe:'체육',art:'예술',etc:'정보·제2외국어·한문·교양'};
     for(const [key,min]of Object.entries(minima))if(totals[key]<min)errors.push(labels[key]+' 최소 '+min+'학점을 충족하지 못했습니다. (현재 '+totals[key]+'학점)');
     if(input.sciTrack===true){
-      if(baseScience.some(id=>!chosen.has(id)))errors.push('과학 중점 과정은 물리학 ·화학 · 생명과학 · 지구과학이 모두 필요합니다.');
+      if(baseScience.some(id=>!chosen.has(id)))errors.push('과학 중점 과정은 물리학 · 화학 · 생명과학 · 지구과학이 모두 필요합니다.');
       if(advanced<6)errors.push('과학 중점 심화 지정 과목은 6과목 이상이어야 합니다. (현재 '+advanced+'과목)');
       if(totals.msi<79)errors.push('과학 중점 수학·과학·정보 합계는 79학점 이상이어야 합니다. (현재 '+totals.msi+'학점)');
       if(mathElectives<4)warnings.push('과학 중점 과정은 수학 선택과목 4과목 이상을 권장합니다.');
